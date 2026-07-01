@@ -1,4 +1,4 @@
-markdown_content_ja = """# Himenos — Git連動シェルスクリプトランチャー
+# Himenos — Git連動シェルスクリプトランチャー
 
 軽量で高速な、Go言語製のGit連動型シェルスクリプト管理・実行Webダッシュボードです。
 
