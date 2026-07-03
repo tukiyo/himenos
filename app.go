@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -139,14 +141,17 @@ type ManagedNode struct {
 }
 
 type MonitorSetting struct {
-	ID         string `yaml:"id"`
-	Name       string `yaml:"name"`
-	NodeID     string `yaml:"node_id"`
-	Type       string `yaml:"type"`       // "ping", "http", "port"
-	Target     string `yaml:"target"`     // http: URL, port: port番号
-	Enabled    bool   `yaml:"enabled"`
-	LastStatus string `yaml:"last_status"` // "正常", "異常", "未実施"
-	LastCheck  string `yaml:"last_check"`
+	ID              string `yaml:"id"`
+	Name            string `yaml:"name"`
+	NodeID          string `yaml:"node_id"`
+	Type            string `yaml:"type"` // "ping", "http", "port"
+	Target          string `yaml:"target"`
+	Operator        string `yaml:"operator"`
+	ThresholdValue  string `yaml:"threshold_value"`
+	LastStatus      string `yaml:"last_status"`
+	LastCheck       string `yaml:"last_check"`
+	LastResultValue string `yaml:"last_result_value"`
+	Enabled         bool   `yaml:"enabled"`
 }
 
 type MonitorHistory struct {
@@ -1455,6 +1460,8 @@ const htmlTemplate = `<!DOCTYPE html>
             flex-direction: column;
             gap: 5px;
             height: 100%;
+            width: 100%;
+            flex: 1;
             overflow-y: auto;
         }
         .split-section {
@@ -1464,6 +1471,59 @@ const htmlTemplate = `<!DOCTYPE html>
             flex-direction: column;
             box-sizing: border-box;
             min-height: 150px;
+        }
+        
+        /* モーダルダイアログのスタイル */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.4);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-card {
+            background: #ffffff;
+            border: 1px solid #d0d7de;
+            border-radius: 6px;
+            width: 400px;
+            max-width: 90%;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            animation: modalFadeIn 0.2s ease-out;
+        }
+        .modal-header {
+            background: linear-gradient(to bottom, #e1e9f6, #c5d7ed);
+            border-bottom: 1px solid #99b4d1;
+            padding: 8px 12px;
+            font-weight: bold;
+            color: #1e395b;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-top-left-radius: 5px;
+            border-top-right-radius: 5px;
+        }
+        .modal-body {
+            padding: 16px;
+        }
+        .modal-close-btn {
+            background: transparent;
+            border: none;
+            font-size: 16px;
+            cursor: pointer;
+            font-weight: bold;
+            color: #1e395b;
+        }
+        .modal-close-btn:hover {
+            color: #ff0000;
+        }
+        @keyframes modalFadeIn {
+            from { opacity: 0; transform: translateY(-20px); }
+            to { opacity: 1; transform: translateY(0); }
         }
     </style>
     <script>
@@ -1545,6 +1605,41 @@ const htmlTemplate = `<!DOCTYPE html>
         window.addEventListener('DOMContentLoaded', updateScheduleForm);
         window.addEventListener('load', updateScheduleForm);
         window.addEventListener('DOMContentLoaded', toggleNewScriptFields);
+        
+        function toggleTargetField() {
+            const typeSelect = document.querySelector('select[name="type"]');
+            const targetInput = document.querySelector('input[name="target"]');
+            if (!typeSelect || !targetInput) return;
+            if (typeSelect.value === 'ping') {
+                targetInput.disabled = true;
+                targetInput.style.background = '#f0f0f0';
+                targetInput.style.color = '#888';
+                targetInput.style.cursor = 'not-allowed';
+                targetInput.placeholder = 'PING時は自動でIPを使用します';
+                targetInput.value = '';
+            } else {
+                targetInput.disabled = false;
+                targetInput.style.background = '#ffffff';
+                targetInput.style.color = '#000';
+                targetInput.style.cursor = 'auto';
+                targetInput.placeholder = '例: 80';
+            }
+        }
+        window.addEventListener('DOMContentLoaded', toggleTargetField);
+        
+        function showAddMonitorModal() {
+            const modal = document.getElementById('add_monitor_modal');
+            if (modal) {
+                modal.style.display = 'flex';
+                toggleTargetField();
+            }
+        }
+        function hideAddMonitorModal() {
+            const modal = document.getElementById('add_monitor_modal');
+            if (modal) {
+                modal.style.display = 'none';
+            }
+        }
     </script>
 </head>
 <body>
@@ -1585,15 +1680,7 @@ const htmlTemplate = `<!DOCTYPE html>
                              📁 scripts
                          </div>
                          {{range .ScriptFiles}}
-                             <div class="tree-node">
-                                 {{.Prefix}}📝 <a href="/?tab=script_edit&file={{.Path}}" class="tree-link">
-                                     {{if .IsEnabled}}
-                                         {{.Name}}
-                                     {{else}}
-                                         <span style="text-decoration: line-through; color: #888;">{{.Name}} (無効化中)</span>
-                                     {{end}}
-                                 </a>
-                             </div>
+                             <div class="tree-node">{{.Prefix}}📝 <a href="/?tab=script_edit&file={{.Path}}" class="tree-link">{{if .IsEnabled}}{{.Name}}{{else}}<span style="text-decoration: line-through; color: #888;">{{.Name}} (無効化中)</span>{{end}}</a></div>
                          {{else}}
                              <div class="tree-node">   └─ scripts/ フォルダにファイルがありません。</div>
                          {{end}}
@@ -1774,7 +1861,7 @@ const htmlTemplate = `<!DOCTYPE html>
                                           </td></tr>
                                       {{end}}
                                       <tr><th>通知設定</th><td>
-                                          {{if eq .SelectedNode.NotifyNormal "default"}}デフォルト設定に従う{{else if eq .SelectedNode.NotifyNormal "none"}}例外: 通知しない{{else if eq .SelectedNode.NotifyNormal "both"}}例外: メール・Slack通知{{else if eq .SelectedNode.NotifyNormal "slack"}}例外: Slack通知{{else if eq .SelectedNode.NotifyNormal "email"}}例外: メール通知{{else}}デフォルト設定に従う{{end}}
+                                          {{if eq .SelectedNode.NotifyNormal "default"}}デフォルト設定に従う{{else if eq .SelectedNode.NotifyNormal "none"}}例外: 通知しない{{else if eq .SelectedNode.NotifyNormal "both"}}例外: メール & Slack 両方{{else if eq .SelectedNode.NotifyNormal "slack"}}例外: Slack のみ{{else if eq .SelectedNode.NotifyNormal "email"}}例外: メール のみ{{else}}デフォルト設定に従う{{end}}
                                       </td></tr>
                                   </table>
 
@@ -1816,9 +1903,9 @@ const htmlTemplate = `<!DOCTYPE html>
                          <input type="hidden" name="tab" value="{{$.CurrentTab}}">
                          {{if $.SelectedJobID}}<input type="hidden" name="s" value="{{$.SelectedJobID}}">{{end}}
                          <input type="text" name="keyword" placeholder="キーワード検索" value="{{.HistoryKeyword}}" style="padding:2px; font-size:12px; width:120px;">
-                         <input type="date" name="start_date" value="{{.SelectedJobID}}" style="padding:2px; font-size:12px;">
+                         <input type="date" name="start_date" value="{{.HistoryStartDate}}" style="padding:2px; font-size:12px;">
                          <span>～</span>
-                         <input type="date" name="end_date" value="{{.WaitConditionsStr}}" style="padding:2px; font-size:12px;">
+                         <input type="date" name="end_date" value="{{.HistoryEndDate}}" style="padding:2px; font-size:12px;">
                          <button type="submit" style="padding:2px 8px; font-size:12px;">検索</button>
                          <a href="/?tab=jobs" style="padding:2px; font-size:12px;">クリア</a>
                      </form>
@@ -1911,10 +1998,11 @@ const htmlTemplate = `<!DOCTYPE html>
                                          {{$targetUnit := index $.JobMap .JobID}}
                                          {{if $targetUnit}}
                                              {{$targetUnit.Name}}
+                                         </td>
                                          {{else}}
                                              <span style="color: red; font-weight: bold;">⚠️ 存在しないジョブ: {{.JobID}}</span>
+                                         </td>
                                          {{end}}
-                                     </td>
                                      <td>
                                          {{if eq .Type "weekly"}}毎週: {{if eq .Weekday "0"}}日曜日{{else if eq .Weekday "1"}}月曜日{{else if eq .Weekday "2"}}火曜日{{else if eq .Weekday "3"}}水曜日{{else if eq .Weekday "4"}}木曜日{{else if eq .Weekday "5"}}金曜日{{else if eq .Weekday "6"}}土曜日{{else}}毎日{{end}} @ {{.Hour}}:{{.Minute}}
                                          {{else if eq .Type "daily"}}毎日 @ {{.Hour}}:{{.Minute}}
@@ -2014,22 +2102,30 @@ const htmlTemplate = `<!DOCTYPE html>
                          <span>🖥️ ノード一覧</span>
                          <a href="/?tab=nodes" class="refresh-icon">🔄 更新</a>
                      </div>
+                     
+                     <div style="margin-top: 5px; margin-bottom: 8px; display:flex; gap:3px; flex-wrap:wrap;">
+                         <a href="/?tab={{$.CurrentTab}}&filter=all&sort={{$.SortKey}}&order={{$.SortOrder}}" class="btn {{if eq $.FilterStatus "all"}}btn-primary{{end}}" style="font-size:10px; padding:2px 6px;">すべて</a>
+                         <a href="/?tab={{$.CurrentTab}}&filter=abnormal&sort={{$.SortKey}}&order={{$.SortOrder}}" class="btn {{if eq $.FilterStatus "abnormal"}}btn-danger{{end}}" style="font-size:10px; padding:2px 6px; {{if ne $.FilterStatus "abnormal"}}background:#fff5f5; color:#cc0000; border-color:#cc9999;{{end}}">🔴 異常のみ</a>
+                         <a href="/?tab={{$.CurrentTab}}&filter=normal&sort={{$.SortKey}}&order={{$.SortOrder}}" class="btn {{if eq $.FilterStatus "normal"}}btn-success{{end}}" style="font-size:10px; padding:2px 6px; {{if ne $.FilterStatus "normal"}}background:#f5fff5; color:#00aa00; border-color:#99cc99;{{end}}">🟢 正常のみ</a>
+                         <a href="/?tab={{$.CurrentTab}}&filter=unknown&sort={{$.SortKey}}&order={{$.SortOrder}}" class="btn {{if eq $.FilterStatus "unknown"}}btn-primary{{end}}" style="font-size:10px; padding:2px 6px; {{if ne $.FilterStatus "unknown"}}background:#f5f5f5; color:#555; border-color:#ccc;{{end}}">⚪ 未判定のみ</a>
+                     </div>
+
                      <table border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:12px;">
                          <thead>
                              <tr>
-                                 <th>ノード名</th>
-                                 <th>IPアドレス</th>
-                                 <th>状態 (監視)</th>
+                                 <th><a href="/?tab={{$.CurrentTab}}&filter={{$.FilterStatus}}&sort=name&order={{if eq $.SortKey "name"}}{{if eq $.SortOrder "asc"}}desc{{else}}asc{{end}}{{else}}asc{{end}}" style="color:inherit; text-decoration:none;">ノード名 {{if eq $.SortKey "name"}}{{if eq $.SortOrder "asc"}}▲{{else}}▼{{end}}{{end}}</a></th>
+                                 <th><a href="/?tab={{$.CurrentTab}}&filter={{$.FilterStatus}}&sort=ip&order={{if eq $.SortKey "ip"}}{{if eq $.SortOrder "asc"}}desc{{else}}asc{{end}}{{else}}asc{{end}}" style="color:inherit; text-decoration:none;">IPアドレス {{if eq $.SortKey "ip"}}{{if eq $.SortOrder "asc"}}▲{{else}}▼{{end}}{{end}}</a></th>
+                                 <th><a href="/?tab={{$.CurrentTab}}&filter={{$.FilterStatus}}&sort=status&order={{if eq $.SortKey "status"}}{{if eq $.SortOrder "asc"}}desc{{else}}asc{{end}}{{else}}asc{{end}}" style="color:inherit; text-decoration:none;">状態 (監視) {{if eq $.SortKey "status"}}{{if eq $.SortOrder "asc"}}▲{{else}}▼{{end}}{{end}}</a></th>
                              </tr>
                          </thead>
                          <tbody>
                              {{range .Nodes}}
                                  <tr class="{{if eq .ID $.SelectedNodeID}}tree-active{{end}}">
-                                     <td><a href="/?tab={{$.CurrentTab}}&s={{.ID}}">{{.Name}}</a></td>
+                                     <td><a href="/?tab={{$.CurrentTab}}&s={{.ID}}&filter={{$.FilterStatus}}&sort={{$.SortKey}}&order={{$.SortOrder}}">{{.Name}}</a></td>
                                      <td>{{.IPAddress}}</td>
                                      <td>
                                          {{if eq .Description "正常"}}<span class="badge status-success">正常</span>
-                                         {{else if eq .Description "異常"}}<span class="badge status-danger">異常</span>
+                                         {{else if eq .Description "異常"}}<span class="badge status-danger" style="background-color: #ff4d4d; color: #ffffff; font-weight: bold; border: 1px solid #d43f3a; padding: 2px 6px; box-shadow: 1px 1px 2px rgba(0,0,0,0.15);">異常</span>
                                          {{else}}<span class="badge status-unknown">未実施 / 不明</span>{{end}}
                                      </td>
                                  </tr>
@@ -2043,10 +2139,28 @@ const htmlTemplate = `<!DOCTYPE html>
                      <form action="/action" method="POST">
                          <input type="hidden" name="action" value="save_nodes_bulk">
                          <textarea name="nodes_csv" rows="6" style="width:100%; font-family:monospace; font-size:12px;">{{.NodeCsvText}}</textarea>
-                         <div style="margin-top:5px;">
+                         <div style="margin-top:5px; display:flex; gap:5px;">
                              <button type="submit" class="btn btn-primary" style="font-size:12px; padding:3px 10px;">💾 ノード一括保存 (適用)</button>
                          </div>
                      </form>
+
+                     <div style="margin-top: 15px; border-top: 1px dashed #ccc; padding-top: 10px; display: flex; gap: 5px;">
+                         <form action="/action" method="POST" style="margin:0; flex:1;" onsubmit="return confirm('「異常」状態のノードをすべて削除しますか？');">
+                             <input type="hidden" name="action" value="delete_nodes_by_status">
+                             <input type="hidden" name="status" value="abnormal">
+                             <button type="submit" class="btn btn-danger" style="width:100%; font-size:11px; padding:3px;">🗑️ 異常ノード一括削除</button>
+                         </form>
+                         <form action="/action" method="POST" style="margin:0; flex:1;" onsubmit="return confirm('「未実施/不明」状態のノードをすべて削除しますか？');">
+                             <input type="hidden" name="action" value="delete_nodes_by_status">
+                             <input type="hidden" name="status" value="unknown">
+                             <button type="submit" class="btn" style="width:100%; font-size:11px; padding:3px; background: #e0e0e0; color: #333; border-color: #ccc;">🗑️ 不明ノード一括削除</button>
+                         </form>
+                         <form action="/action" method="POST" style="margin:0; flex:1;" onsubmit="return confirm('すべてのノードを削除しますか？');">
+                             <input type="hidden" name="action" value="delete_nodes_by_status">
+                             <input type="hidden" name="status" value="all">
+                             <button type="submit" class="btn btn-danger" style="width:100%; font-size:11px; padding:3px;">🗑️ 全ノード削除</button>
+                         </form>
+                     </div>
                  </div>
 
                  <div style="flex: 1; padding: 10px; height: 100%; box-sizing: border-box; overflow-y: auto; font-size:12px;">
@@ -2064,7 +2178,7 @@ const htmlTemplate = `<!DOCTYPE html>
                                  <tr><th>監視項目</th><th>閾値</th><th>状態</th></tr>
                              </thead>
                              <tbody>
-                                 {{range .NodeMonitors}}
+                                 {{range .SelectedNodeMonitors}}
                                      <tr>
                                          <td>{{.Type}} ({{.Target}})</td>
                                          <td>{{.Operator}} {{.ThresholdValue}}</td>
@@ -2114,32 +2228,36 @@ const htmlTemplate = `<!DOCTYPE html>
                  </div>
             </div>
 
-            <!-- 2. ノードマップセクション -->
+            <!-- 2. ノードマップセクション (グリッドレイアウトへ改善) -->
             <div class="split-section" style="min-height: 200px; padding:10px; height: 250px; overflow-y: auto; box-sizing: border-box;">
                  <div class="view-title" style="margin: -10px -10px 10px -10px;">
-                     <span>🗺️ ノードマップ (トポロジー)</span>
+                     <span>🗺️ ノードマップ (一覧トポロジー)</span>
                      <a href="/?tab=nodes" class="refresh-icon">🔄 更新</a>
                  </div>
-                 <div class="topology-map" style="margin-top:10px; font-size:12px;">
-        Himenos-Manager (Local)
-               │
-               ├───────────────┐
-               ▼               ▼
-         [監視ノード一覧]
-    {{range .Nodes}}
-         ├── ● <span class="topo-node {{if eq .Description "正常"}}topo-ok{{else if eq .Description "異常"}}topo-err{{else}}topo-unknown{{end}}"><a href="/?tab={{$.CurrentTab}}&s={{.ID}}" style="color:inherit;">{{.Name}} ({{.IPAddress}}) [{{.Description}}]</a></span>
-    {{else}}
-         └── 登録ノードがありません。
-    {{end}}
+                 <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top:10px; padding: 10px; background: #fafafa; border: 1px solid #ccc; max-height: 180px; overflow-y: auto;">
+                     {{range .Nodes}}
+                          <div class="topo-node {{if eq .Description "正常"}}topo-ok{{else if eq .Description "異常"}}topo-err{{else}}topo-unknown{{end}}" style="font-size: 11px; padding: 4px 8px; min-width: 140px; text-align: center; box-shadow: 1px 1px 3px rgba(0,0,0,0.1); border-radius: 4px; box-sizing: border-box;">
+                              <a href="/?tab={{$.CurrentTab}}&s={{.ID}}&filter={{$.FilterStatus}}&sort={{$.SortKey}}&order={{$.SortOrder}}" style="color:inherit; text-decoration: none;">
+                                  <strong>{{.Name}}</strong><br>
+                                  <span style="font-size: 9px; opacity: 0.85;">{{.IPAddress}} [{{.Description}}]</span>
+                              </a>
+                          </div>
+                     {{else}}
+                          <div style="color: #666; font-size: 12px; padding: 10px;">登録ノードがありません。</div>
+                     {{end}}
                  </div>
             </div>
 
             <!-- 3. 監視管理セクション -->
-            <div class="split-section" style="min-height: 300px; display: flex; flex-direction: row; gap: 5px; height: 350px; overflow-y: auto;">
-                 <div style="flex: 1.5; padding: 10px; border-right: 1px solid #ccc; height: 100%; box-sizing: border-box; overflow-y: auto;">
-                     <div class="view-title" style="margin: -10px -10px 10px -10px;">
+            <div class="split-section" style="min-height: 300px; display: flex; flex-direction: row; gap: 5px; height: 350px;">
+                 <!-- A. 監視設定一覧 -->
+                 <div style="flex: 1; padding: 10px; border-right: 1px solid #ccc; height: 100%; box-sizing: border-box; overflow-y: auto;">
+                     <div class="view-title" style="margin: -10px -10px 10px -10px; display: flex; justify-content: space-between; align-items: center;">
                          <span>🔍 監視設定一覧</span>
-                         <a href="/?tab=nodes" class="refresh-icon">🔄 更新</a>
+                         <div style="display:flex; gap:10px; align-items:center;">
+                             <button onclick="showAddMonitorModal()" class="btn btn-primary" style="font-size:11px; padding:2px 8px; font-weight:bold; height:20px; line-height:14px; display:inline-flex; align-items:center;">➕ 監視設定の追加</button>
+                             <a href="/?tab=nodes" class="refresh-icon">🔄 更新</a>
+                         </div>
                      </div>
                      <div style="font-size:12px; margin-bottom:10px;">
                          <strong>全体ステータス:</strong> 
@@ -2160,9 +2278,12 @@ const htmlTemplate = `<!DOCTYPE html>
                              </tr>
                          </thead>
                          <tbody>
-                             {{range .NodeMonitors}}
+                              {{range .NodeMonitors}}
                                  <tr>
-                                     <td>{{.NodeID}}</td>
+                                     <td>
+                                         {{$nodeObj := index $.NodeMap .NodeID}}
+                                         {{if $nodeObj}}{{$nodeObj.Name}}{{else}}{{.NodeID}}{{end}}
+                                     </td>
                                      <td>{{.Type}} ({{.Target}})</td>
                                      <td>{{.Operator}} {{.ThresholdValue}}</td>
                                      <td>
@@ -2184,73 +2305,41 @@ const htmlTemplate = `<!DOCTYPE html>
                          </tbody>
                      </table>
 
-                     <h4 style="margin-top:20px;">📜 監視アラート履歴</h4>
-                     <table border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:11px;">
-                         <thead>
-                             <tr>
-                                 <th>日時</th>
-                                 <th>対象ノード</th>
-                                 <th>項目</th>
-                                 <th>判定結果</th>
-                                 <th>値</th>
-                             </tr>
-                         </thead>
-                         <tbody>
-                             {{range .MonitorHistory}}
-                                 <tr>
-                                     <td>{{.Timestamp}}</td>
-                                     <td>{{.NodeID}}</td>
-                                     <td>{{.MonitorType}}</td>
-                                     <td>
-                                         {{if eq .Status "正常"}}<span class="badge status-success">正常</span>
-                                         {{else}}<span class="badge status-danger">異常</span>{{end}}
-                                     </td>
-                                     <td>{{.Value}} (閾値: {{.Detail}})</td>
-                                 </tr>
-                             {{else}}
-                                 <tr><td colspan="5">監視履歴はありません。</td></tr>
-                             {{end}}
-                         </tbody>
-                     </table>
+                     </div>
+
+                 <!-- B. 監視アラート履歴 -->
+                 <div style="flex: 1; padding: 10px; height: 100%; box-sizing: border-box; overflow-y: auto;">
+                      <div class="view-title" style="margin: -10px -10px 10px -10px;">
+                          <span>📜 監視アラート履歴</span>
+                      </div>
+                      <table border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:11px; margin-top: 10px;">
+                          <thead>
+                              <tr>
+                                  <th>日時</th>
+                                  <th>対象ノード</th>
+                                  <th>項目</th>
+                                  <th>判定結果</th>
+                                  <th>ログ・結果値</th>
+                              </tr>
+                          </thead>
+                          <tbody>
+                              {{range .MonitorHistory}}
+                                  <tr>
+                                      <td>{{.CheckTime}}</td>
+                                      <td>{{.NodeName}}</td>
+                                      <td>{{.Name}} ({{.Type}})</td>
+                                      <td>
+                                          {{if eq .Status "正常"}}<span class="badge status-success">正常</span>
+                                          {{else}}<span class="badge status-danger">異常</span>{{end}}
+                                      </td>
+                                      <td>{{.Log}}</td>
+                                  </tr>
+                              {{else}}
+                                  <tr><td colspan="5">監視履歴はありません。</td></tr>
+                              {{end}}
+                          </tbody>
+                      </table>
                  </div>
-
-                 <div style="flex: 1; padding: 10px; height: 100%; box-sizing: border-box; overflow-y: auto; font-size:12px;">
-                     <div class="view-title" style="margin: -10px -10px 10px -10px;"><span>➕ 監視設定追加</span></div>
-                     <form action="/action" method="POST">
-                         <input type="hidden" name="action" value="create_monitor">
-                         
-                         <label style="margin-top:3px;">対象ノード:</label>
-                         <select name="node_id" style="width:100%; font-size:12px; padding:2px;">
-                             {{range .Nodes}}
-                                 <option value="{{.ID}}">{{.Name}} ({{.IPAddress}})</option>
-                             {{end}}
-                         </select>
-
-                         <label style="margin-top:5px;">監視項目タイプ:</label>
-                         <select name="type" style="width:100%; font-size:12px; padding:2px;">
-                             <option value="ping">PING 応答監視 (死活監視)</option>
-                             <option value="cpu">CPU 使用率監視 (%)</option>
-                             <option value="memory">メモリ 使用率監視 (%)</option>
-                             <option value="disk">ディスク 空き容量監視 (%)</option>
-                             <option value="port">TCP ポート接続確認</option>
-                         </select>
-
-                         <label style="margin-top:5px;">ターゲット (ポート番号やディスクパスなど):</label>
-                         <input type="text" name="target" placeholder="例: 80 や C: または /" style="width:100%; font-size:12px; padding:2px;">
-
-                         <label style="margin-top:5px;">比較演算子:</label>
-                         <select name="operator" style="width:100%; font-size:12px; padding:2px;">
-                             <option value=">">閾値より大きい ( > )</option>
-                             <option value="<">閾値より小さい ( < )</option>
-                             <option value="==">等しい ( == )</option>
-                             <option value="!=">等しくない ( != )</option>
-                         </select>
-
-                         <label style="margin-top:5px;">閾値数値 (PING監視の場合はタイムアウトms値):</label>
-                         <input type="text" name="threshold_value" required value="80" style="width:100%; font-size:12px; padding:2px;">
-
-                         <button type="submit" style="margin-top:10px; width:100%; padding:4px;">➕ 登録</button>
-                     </form>
                  </div>
             </div>
         </div>
@@ -2325,6 +2414,39 @@ const htmlTemplate = `<!DOCTYPE html>
     <span>Himenos-Go v3.1 Web UI (w3m対応)</span>
 </div>
 
+<!-- 監視設定追加モーダルダイアログ -->
+<div id="add_monitor_modal" class="modal-overlay" onclick="if(event.target===this) hideAddMonitorModal();">
+    <div class="modal-card">
+        <div class="modal-header">
+            <span>➕ 監視設定追加</span>
+            <button onclick="hideAddMonitorModal()" class="modal-close-btn">&times;</button>
+        </div>
+        <div class="modal-body" style="font-size:12px;">
+            <form action="/action" method="POST" style="margin:0;">
+                <input type="hidden" name="action" value="create_monitor">
+                
+                <label style="margin-top:0px; font-weight: bold; color: #24292f;">対象ノード:</label>
+                <select name="node_id" style="width:100%; font-size:12px; padding:4px; border: 1px solid #d0d7de; border-radius: 4px; margin-bottom: 12px; background: #ffffff;">
+                    {{range .Nodes}}
+                        <option value="{{.ID}}">{{.Name}} ({{.IPAddress}})</option>
+                    {{end}}
+                </select>
+
+                <label style="font-weight: bold; color: #24292f;">監視項目タイプ:</label>
+                <select name="type" onchange="toggleTargetField()" style="width:100%; font-size:12px; padding:4px; border: 1px solid #d0d7de; border-radius: 4px; margin-bottom: 12px; background: #ffffff;">
+                    <option value="ping">PING 応答監視 (死活監視)</option>
+                    <option value="port">TCP ポート接続確認</option>
+                </select>
+
+                <label style="font-weight: bold; color: #24292f;">ターゲット (ポート番号など):</label>
+                <input type="text" name="target" placeholder="例: 80" style="width:100%; font-size:12px; padding:4px; border: 1px solid #d0d7de; border-radius: 4px; margin-bottom: 15px; box-sizing: border-box;">
+
+                <button type="submit" class="btn btn-primary" style="width:100%; padding:6px; font-weight: bold; border-radius: 4px; cursor: pointer; text-align: center;">➕ 登録</button>
+            </form>
+        </div>
+    </div>
+</div>
+
 </body>
 </html>`
 
@@ -2341,12 +2463,14 @@ type ScriptFileInfo struct {
 }
 
 type PageData struct {
-	RedCount          int
-	YellowCount       int
-	GreenCount        int
-	BlueCount         int
-	TotalCount        int
-	ScriptFiles       []ScriptFileInfo
+	HistoryStartDate      string
+	HistoryEndDate        string
+	RedCount              int
+	YellowCount           int
+	GreenCount            int
+	BlueCount             int
+	TotalCount            int
+	ScriptFiles           []ScriptFileInfo
 	SelectedScriptEnabled bool
 	ScriptContent     string
 	SchedulesCronText string
@@ -2374,12 +2498,29 @@ type PageData struct {
 	SelectedNodeID    string
 	SelectedNodeData  *ManagedNode
 	NodeMonitors      []*MonitorSetting
+	SelectedNodeMonitors []*MonitorSetting
+	NodeMap           map[string]*ManagedNode
 	MonitorHistory    []MonitorHistory
+	SortKey           string
+	SortOrder         string
+	FilterStatus      string
 }
 
 type SessionNodeItem struct {
 	Node        *NodeState
 	StatusLabel string
+}
+
+func ipToUint32(ipStr string) uint32 {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return 0
+	}
+	ipv4 := ip.To4()
+	if ipv4 == nil {
+		return 0
+	}
+	return binary.BigEndian.Uint32(ipv4)
 }
 
 func main() {
@@ -2405,6 +2546,7 @@ func main() {
 			Schedules:   engine.schedules,
 			Sessions:    engine.sessions,
 			JobMap:      engine.jobs,
+			NodeMap:     engine.nodes,
 			ErrorMessage: r.URL.Query().Get("err"),
 		}
 
@@ -2581,8 +2723,8 @@ func main() {
 			filterStatus := r.URL.Query().Get("filter_status")
 
 			data.HistoryKeyword = keyword
-			data.SelectedJobID = startDateStr
-			data.WaitConditionsStr = endDateStr
+			data.HistoryStartDate = startDateStr
+			data.HistoryEndDate = endDateStr
 
 			var filteredSessions []*JobSession
 			for _, s := range engine.sessions {
@@ -2680,31 +2822,26 @@ func main() {
 			data.BlueCount = blue
 
 		} else if isNodeTab {
-			// 1. ノード一覧データロード
 			id := r.URL.Query().Get("s")
-			for _, n := range engine.nodes {
-				data.Nodes = append(data.Nodes, n)
+			sortKey := r.URL.Query().Get("sort")
+			if sortKey == "" {
+				sortKey = "ip"
 			}
-			var lines []string
-			for _, n := range engine.nodes {
-				lines = append(lines, fmt.Sprintf("%s,%s,%s,%s", n.Name, n.IPAddress, n.Platform, n.Description))
+			sortOrder := r.URL.Query().Get("order")
+			if sortOrder == "" {
+				sortOrder = "asc"
 			}
-			data.NodeCsvText = strings.Join(lines, "\n")
-
-			if id != "" {
-				if n, exists := engine.nodes[id]; exists {
-					data.SelectedNodeID = id
-					data.SelectedNodeData = n
-					for _, m := range engine.monitors {
-						if m.NodeID == id {
-							data.NodeMonitors = append(data.NodeMonitors, m)
-						}
-					}
-				}
+			filterStatus := r.URL.Query().Get("filter")
+			if filterStatus == "" {
+				filterStatus = "all"
 			}
 
-			// 2. ノードマップ(トポロジー)＆監視最悪ステータス集計
-			data.Nodes = nil // 一旦クリアして重複を防ぐ
+			data.SortKey = sortKey
+			data.SortOrder = sortOrder
+			data.FilterStatus = filterStatus
+
+			// 1. ノードマップ(トポロジー)＆監視最悪ステータス集計
+			var allNodes []*ManagedNode
 			for _, n := range engine.nodes {
 				worstStatus := "正常"
 				hasMonitor := false
@@ -2722,14 +2859,127 @@ func main() {
 					worstStatus = "未実施"
 				}
 				n.Description = worstStatus
-				data.Nodes = append(data.Nodes, n)
+				allNodes = append(allNodes, n)
 			}
 
-			// 3. 監視管理データロード
-			data.MonitorHistory = engine.monHistory
-			for _, m := range engine.monitors {
-				data.NodeMonitors = append(data.NodeMonitors, m)
+			// CSVテキストの生成 (フィルター前の状態を常に全件保持)
+			var lines []string
+			for _, n := range allNodes {
+				lines = append(lines, fmt.Sprintf("%s,%s,%s,%s", n.Name, n.IPAddress, n.Platform, n.Description))
 			}
+			data.NodeCsvText = strings.Join(lines, "\n")
+
+			// 2. フィルタリングの適用
+			var filteredNodes []*ManagedNode
+			for _, n := range allNodes {
+				if filterStatus == "abnormal" && n.Description != "異常" {
+					continue
+				}
+				if filterStatus == "normal" && n.Description != "正常" {
+					continue
+				}
+				if filterStatus == "unknown" && n.Description != "未実施" {
+					continue
+				}
+				filteredNodes = append(filteredNodes, n)
+			}
+
+			// 3. ソートの適用
+			sort.Slice(filteredNodes, func(i, j int) bool {
+				valI, valJ := filteredNodes[i], filteredNodes[j]
+				isLess := false
+
+				switch sortKey {
+				case "name":
+					isLess = valI.Name < valJ.Name
+				case "status":
+					prio := func(status string) int {
+						switch status {
+						case "異常":
+							return 3
+						case "未実施":
+							return 2
+						case "正常":
+							return 1
+						default:
+							return 0
+						}
+					}
+					isLess = prio(valI.Description) > prio(valJ.Description)
+				case "ip":
+					fallthrough
+				default:
+					isLess = ipToUint32(valI.IPAddress) < ipToUint32(valJ.IPAddress)
+				}
+
+				if sortOrder == "desc" {
+					return !isLess
+				}
+				return isLess
+			})
+
+			data.Nodes = filteredNodes
+
+			if id != "" {
+				if n, exists := engine.nodes[id]; exists {
+					data.SelectedNodeID = id
+					data.SelectedNodeData = n
+					for _, m := range engine.monitors {
+						if m.NodeID == id {
+							data.SelectedNodeMonitors = append(data.SelectedNodeMonitors, m)
+						}
+					}
+				}
+			}
+
+			// 4. 監視管理データロード (全体)
+			data.MonitorHistory = engine.monHistory
+			var allMonitors []*MonitorSetting
+			for _, m := range engine.monitors {
+				allMonitors = append(allMonitors, m)
+			}
+			sort.Slice(allMonitors, func(i, j int) bool {
+				valI, valJ := allMonitors[i], allMonitors[j]
+				nodeI := engine.nodes[valI.NodeID]
+				nodeJ := engine.nodes[valJ.NodeID]
+				if nodeI == nil && nodeJ == nil {
+					return valI.ID < valJ.ID
+				}
+				if nodeI == nil {
+					return true
+				}
+				if nodeJ == nil {
+					return false
+				}
+				isLess := false
+				switch sortKey {
+				case "name":
+					isLess = nodeI.Name < nodeJ.Name
+				case "status":
+					prio := func(status string) int {
+						switch status {
+						case "異常":
+							return 3
+						case "未実施":
+							return 2
+						case "正常":
+							return 1
+						default:
+							return 0
+						}
+					}
+					isLess = prio(valI.LastStatus) > prio(valJ.LastStatus)
+				case "ip":
+					fallthrough
+				default:
+					isLess = ipToUint32(nodeI.IPAddress) < ipToUint32(nodeJ.IPAddress)
+				}
+				if sortOrder == "desc" {
+					return !isLess
+				}
+				return isLess
+			})
+			data.NodeMonitors = allMonitors
 			var red, green, blue int
 			for _, m := range engine.monitors {
 				if m.LastStatus == "異常" {
@@ -3395,11 +3645,34 @@ func main() {
 				}
 			}
 
-			engine.nodes = newNodes
-			engine.saveNodes()
-			engine.saveMonitors()
-			engine.mu.Unlock()
-			redirectTo = "/?tab=nodes"
+			            // 全登録ノードに対してデフォルトのPING死活監視が存在しない場合は自動補完
+            for nodeID, node := range newNodes {
+                hasPing := false
+                for _, m := range engine.monitors {
+                    if m.NodeID == nodeID && m.Type == "ping" {
+                        hasPing = true
+                        break
+                    }
+                }
+                if !hasPing {
+                    monitorID := "mon_ping_" + nodeID
+                    engine.monitors[monitorID] = &MonitorSetting{
+                        ID:         monitorID,
+                        Name:       "Ping監視",
+                        NodeID:     nodeID,
+                        Type:       "ping",
+                        Target:     node.IPAddress,
+                        Enabled:    true,
+                        LastStatus: "未実施",
+                    }
+                }
+            }
+
+            engine.nodes = newNodes
+            engine.saveNodes()
+            engine.saveMonitors()
+            engine.mu.Unlock()
+            redirectTo = "/?tab=nodes" 
 
 		case "toggle_monitor":
 			id := r.FormValue("id")
@@ -3411,6 +3684,32 @@ func main() {
 			}
 			engine.mu.Unlock()
 			redirectTo = "/?tab=nodes&s=" + nodeID
+
+		case "delete_nodes_by_status":
+			status := r.FormValue("status")
+			engine.mu.Lock()
+			var toDelete []string
+			for id, n := range engine.nodes {
+				if status == "all" {
+					toDelete = append(toDelete, id)
+				} else if status == "abnormal" && n.Description == "異常" {
+					toDelete = append(toDelete, id)
+				} else if status == "unknown" && n.Description != "正常" && n.Description != "異常" {
+					toDelete = append(toDelete, id)
+				}
+			}
+			for _, id := range toDelete {
+				delete(engine.nodes, id)
+				for mID, m := range engine.monitors {
+					if m.NodeID == id {
+						delete(engine.monitors, mID)
+					}
+				}
+			}
+			engine.saveNodes()
+			engine.saveMonitors()
+			engine.mu.Unlock()
+			redirectTo = "/?tab=nodes"
 
 		case "delete_node":
 			id := r.FormValue("id")
