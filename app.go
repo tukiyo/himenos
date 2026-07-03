@@ -1550,878 +1550,708 @@ const htmlTemplate = `<!DOCTYPE html>
 <body>
 
 <div class="toolbar">
-    <a href="/?tab=jobs" class="tool-btn {{if or (eq .CurrentTab "jobs") (eq .CurrentTab "script_edit")}}tool-active{{end}}">📋 ジョブ設定</a>
-    <a href="/?tab=history" class="tool-btn {{if eq .CurrentTab "history"}}tool-active{{end}}">📊 ジョブ履歴</a>
-    <a href="/?tab=schedules" class="tool-btn {{if eq .CurrentTab "schedules"}}tool-active{{end}}">📅 スケジュール設定</a>
-    <a href="/?tab=nodes" class="tool-btn {{if eq .CurrentTab "nodes"}}tool-active{{end}}">🏢 ノード一覧</a>
-    <a href="/?tab=topology" class="tool-btn {{if eq .CurrentTab "topology"}}tool-active{{end}}">🗺️ ノードマップ</a>
-    <a href="/?tab=monitors" class="tool-btn {{if eq .CurrentTab "monitors"}}tool-active{{end}}">🔍 監視管理</a>
+    <a href="/?tab=jobs" class="tool-btn {{if or (eq .CurrentTab "jobs") (eq .CurrentTab "history") (eq .CurrentTab "schedules") (eq .CurrentTab "script_edit") (eq .CurrentTab "job_new") (eq .CurrentTab "job_edit")}}tool-active{{end}}">📋 ジョブ管理</a>
+    <a href="/?tab=nodes" class="tool-btn {{if or (eq .CurrentTab "nodes") (eq .CurrentTab "topology") (eq .CurrentTab "monitors") (eq .CurrentTab "nodes_manage") (eq .CurrentTab "node_new")}}tool-active{{end}}">🖥️ ノード・監視</a>
     <a href="/?tab=settings" class="tool-btn {{if eq .CurrentTab "settings"}}tool-active{{end}}">⚙️ 環境構築</a>
 </div>
 
 <div class="container">
-    {{if eq .CurrentTab "jobs"}}
-        <!-- ジョブ定義ペイン -->
-        <div class="pane-left">
-            <div class="view-title">
-                <span>ジョブ定義[一覧]</span>
-                <a href="/?tab=jobs{{if .SelectedJobID}}&s={{.SelectedJobID}}{{end}}" class="refresh-icon">🔄 更新</a>
-            </div>
-            <div class="view-content">
-                <div style="margin-bottom: 10px; display: flex; gap: 5px;">
-                    <a href="/?tab=job_new&type=job" class="btn btn-primary" style="flex:1; text-align:center;">＋ ジョブ作成</a>
-                    <a href="/?tab=job_new&type=unit" class="btn" style="flex:1; text-align:center;">＋ ユニット作成</a>
-                </div>
-                {{range .JobTree}}
-                    <div class="tree-node {{if eq .Node.ID $.SelectedJobID}}tree-active{{end}}">
-                        {{.Prefix}}{{if eq .Node.Type "unit"}}🏢{{else if eq .Node.Type "net"}}📂{{else}}📄{{end}} <a href="/?tab=jobs&s={{.Node.ID}}" class="tree-link">{{.Node.Name}}</a>
-                    </div>
-                {{else}}
-                    <div>ジョブが登録されていません。</div>
-                {{end}}
+    {{if or (eq .CurrentTab "jobs") (eq .CurrentTab "history") (eq .CurrentTab "schedules") (eq .CurrentTab "script_edit") (eq .CurrentTab "job_new") (eq .CurrentTab "job_edit") (eq .CurrentTab "jobs_manage")}}
+        <!-- ジョブ管理 統合画面 -->
+        <div class="split-layout">
+            <!-- 1. ジョブ設定セクション -->
+            <div class="split-section" style="min-height: 400px; display: flex; flex-direction: row; gap: 5px; height: 450px;">
+                 <!-- 左ペイン：ジョブツリー -->
+                 <div class="pane-left" style="flex: 1; border: none; height: 100%; box-sizing: border-box; overflow-y: auto;">
+                     <div class="view-title">
+                         <span>ジョブ定義[一覧]</span>
+                         <a href="/?tab=jobs{{if .SelectedJobID}}&s={{.SelectedJobID}}{{end}}" class="refresh-icon">🔄 更新</a>
+                     </div>
+                     <div class="view-content">
+                         <div style="margin-bottom: 10px; display: flex; gap: 5px;">
+                             <a href="/?tab=job_new&type=job" class="btn btn-primary" style="flex:1; text-align:center;">＋ ジョブ作成</a>
+                             <a href="/?tab=job_new&type=unit" class="btn" style="flex:1; text-align:center;">＋ ユニット作成</a>
+                         </div>
+                         {{range .JobTree}}
+                             <div class="tree-node {{if eq .Node.ID $.SelectedJobID}}tree-active{{end}}">
+                                 {{.Prefix}}{{if eq .Node.Type "unit"}}🏢{{else if eq .Node.Type "net"}}📂{{else}}📄{{end}} <a href="/?tab=jobs&s={{.Node.ID}}" class="tree-link">{{.Node.Name}}</a>
+                             </div>
+                         {{else}}
+                             <div>ジョブが登録されていません。</div>
+                         {{end}}
 
-                <h4 style="margin-top:20px; border-bottom:1px solid #ccc; padding-bottom:3px;">📁 実スクリプトファイル一覧</h4>
-                <div class="tree-node">
-                    📁 scripts
-                </div>
-                {{range .ScriptFiles}}
-                    <div class="tree-node">
-                        {{.Prefix}}📝 <a href="/?tab=script_edit&file={{.Path}}" class="tree-link">
-                            {{if .IsEnabled}}
-                                {{.Name}}
-                            {{else}}
-                                <span style="text-decoration: line-through; color: #888;">{{.Name}} (無効化中)</span>
-                            {{end}}
-                        </a>
-                    </div>
-                {{else}}
-                    <div class="tree-node">   └─ scripts/ フォルダにファイルがありません。</div>
-                {{end}}
-            </div>
-        </div>
+                         <h4 style="margin-top:20px; border-bottom:1px solid #ccc; padding-bottom:3px;">📁 実スクリプトファイル一覧</h4>
+                         <div class="tree-node">
+                             📁 scripts
+                         </div>
+                         {{range .ScriptFiles}}
+                             <div class="tree-node">
+                                 {{.Prefix}}📝 <a href="/?tab=script_edit&file={{.Path}}" class="tree-link">
+                                     {{if .IsEnabled}}
+                                         {{.Name}}
+                                     {{else}}
+                                         <span style="text-decoration: line-through; color: #888;">{{.Name}} (無効化中)</span>
+                                     {{end}}
+                                 </a>
+                             </div>
+                         {{else}}
+                             <div class="tree-node">   └─ scripts/ フォルダにファイルがありません。</div>
+                         {{end}}
+                     </div>
+                 </div>
 
-        <div class="pane-right">
-            <div class="view-title">
-                <span>ジョブ定義[詳細]</span>
-            </div>
-            <div class="view-content">
-                {{if .ErrorMessage}}
-                    <div class="error-message">{{.ErrorMessage}}</div>
-                {{end}}
-                {{if .SelectedNode}}
-                    <h3>{{.SelectedNode.Name}}</h3>
-                    <table border="1" cellspacing="0" cellpadding="4">
-                        <tr><th style="width: 30%;">項目</th><th>設定値</th></tr>
-                        <tr><th>ジョブ名</th><td>{{.SelectedNode.Name}}</td></tr>
-                        {{if eq .SelectedNode.Type "job"}}
-                            <tr><th>実行スクリプト</th><td><code>{{.SelectedNode.Command}}</code></td></tr>
-                            {{if .SelectedNode.RunUser}}
-                                <tr><th>引数</th><td><code>{{.SelectedNode.RunUser}}</code></td></tr>
-                            {{end}}
-                        {{end}}
-                        {{if .SelectedNode.WaitConditions}}
-                            <tr><th>待ち条件 (先行ジョブ)</th><td>
-                                {{range .SelectedNode.WaitConditions}}
-                                    {{$targetNode := index $.JobMap .JobID}}
-                                    {{if $targetNode}}{{$targetNode.Name}}{{else}}{{.JobID}}{{end}} (正常終了待ち)<br>
-                                {{end}}
-                            </td></tr>
-                        {{end}}
-                        <tr><th>通知設定</th><td>
-                            {{if eq .SelectedNode.NotifyNormal "default"}}デフォルト設定に従う{{else if eq .SelectedNode.NotifyNormal "none"}}例外: 通知しない{{else if eq .SelectedNode.NotifyNormal "both"}}例外: メール・Slack通知{{else if eq .SelectedNode.NotifyNormal "slack"}}例外: Slack通知{{else if eq .SelectedNode.NotifyNormal "email"}}例外: メール通知{{else}}デフォルト設定に従う{{end}}
-                        </td></tr>
-                    </table>
+                 <!-- 右ペイン：詳細 / 新規 / 編集 / スクリプト編集 -->
+                 <div class="pane-right" style="flex: 2; border: none; height: 100%; box-sizing: border-box; overflow-y: auto;">
+                     {{if eq .CurrentTab "job_new"}}
+                          <div class="view-title"><span>新規作成 ({{if eq .NewNodeType "unit"}}ユニット{{else if eq .NewNodeType "net"}}ネット{{else}}ジョブ{{end}})</span></div>
+                          <div class="view-content">
+                              {{if .ErrorMessage}}
+                                  <div class="error-message">{{.ErrorMessage}}</div>
+                              {{end}}
+                              <form action="/action" method="POST">
+                                  <input type="hidden" name="action" value="create_job">
+                                  <input type="hidden" name="type" value="{{.NewNodeType}}">
+                                  <input type="hidden" name="parent_id" value="{{.ParentID}}">
 
-                    <div style="margin-top: 15px; display: flex; gap: 5px;">
-                        {{if or (eq .SelectedNode.Type "unit") (and (eq .SelectedNode.Type "job") .SelectedNode.Command)}}
-                            <form action="/action" method="POST" style="margin:0;">
-                                <input type="hidden" name="action" value="run_job">
-                                <input type="hidden" name="id" value="{{.SelectedNode.ID}}">
-                                <button type="submit">⚡ ジョブの実行</button>
-                            </form>
-                        {{end}}
-                        <a href="/?tab=job_edit&id={{.SelectedNode.ID}}" class="btn">✏️ 変更 / スクリプト編集</a>
-                        {{if or (eq .SelectedNode.Type "unit") (eq .SelectedNode.Type "net")}}
-                            <a href="/?tab=job_new&type=net&parent={{.SelectedNode.ID}}" class="btn">📂 下位ネット作成</a>
-                            <a href="/?tab=job_new&type=job&parent={{.SelectedNode.ID}}" class="btn btn-primary">📄 下位ジョブ作成</a>
-                        {{end}}
-                        <form action="/action" method="POST" style="margin:0;">
-                            <input type="hidden" name="action" value="delete_job">
-                            <input type="hidden" name="id" value="{{.SelectedNode.ID}}">
-                            <button type="submit" class="btn btn-danger" onclick="return confirm('本当に削除しますか？');">🗑️ 削除</button>
-                        </form>
-                    </div>
-                {{else}}
-                    <p>左側のツリーからジョブを選択してください。実スクリプトファイル名をクリックすると、スクリプトの直接編集が可能です。</p>
-                {{end}}
-            </div>
-        </div>
+                                  <label>名前:</label>
+                                  <input type="text" name="name" required placeholder="例: バックアップ処理">
 
-    {{else if eq .CurrentTab "script_edit"}}
-        <div class="pane-left">
-            <div class="view-title">
-                <span>ジョブ定義[一覧]</span>
-            </div>
-            <div class="view-content">
-                <div style="margin-bottom: 10px; display: flex; gap: 5px;">
-                    <a href="/?tab=job_new&type=job" class="btn btn-primary" style="flex:1; text-align:center;">＋ ジョブ作成</a>
-                    <a href="/?tab=job_new&type=unit" class="btn" style="flex:1; text-align:center;">＋ ユニット作成</a>
-                </div>
-                {{range .JobTree}}
-                    <div class="tree-node">
-                        {{.Prefix}}{{if eq .Node.Type "unit"}}🏢{{else if eq .Node.Type "net"}}📂{{else}}📄{{end}} <a href="/?tab=jobs&s={{.Node.ID}}" class="tree-link">{{.Node.Name}}</a>
-                    </div>
-                {{end}}
+                                  {{if eq .NewNodeType "job"}}
+                                      <label>実行スクリプトファイル:</label>
+                                      <select name="script_select" id="script_select" onchange="toggleNewScriptFields()">
+                                          <option value="__NEW__">＋ 新規スクリプトファイルを作成する</option>
+                                          {{range .ScriptFiles}}
+                                              {{if .IsEnabled}}
+                                                  <option value="{{.Path}}" {{if eq .Path $.SelectedJobID}}selected{{end}}>{{.Name}} (既存ファイル)</option>
+                                              {{end}}
+                                          {{end}}
+                                      </select>
 
-                <h4 style="margin-top:20px; border-bottom:1px solid #ccc; padding-bottom:3px;">📁 実スクリプトファイル一覧</h4>
-                <div class="tree-node">
-                    📁 scripts
-                </div>
-                {{range .ScriptFiles}}
-                    <div class="tree-node">
-                        {{.Prefix}}📝 <a href="/?tab=script_edit&file={{.Path}}" class="tree-link">
-                            {{if .IsEnabled}}
-                                {{.Name}}
-                            {{else}}
-                                <span style="text-decoration: line-through; color: #888;">{{.Name}} (無効化中)</span>
-                            {{end}}
-                        </a>
-                    </div>
-                {{end}}
-            </div>
-        </div>
+                                      <div id="new_script_fields" style="display: none;">
+                                          <label>新規作成ファイル名 (新規作成時のみ):</label>
+                                          <input type="text" name="script_filename" placeholder="例: backup.sh">
 
-        <div class="pane-right">
-            <div class="view-title"><span>スクリプトファイルの直接編集: {{.SelectedJobID}}</span></div>
-            <div class="view-content">
-                {{if .ErrorMessage}}
-                    <div class="error-message">{{.ErrorMessage}}</div>
-                {{end}}
-                <form action="/action" method="POST">
-                    <input type="hidden" name="action" value="save_script_only">
-                    <input type="hidden" name="filepath" value="{{.SelectedJobID}}">
+                                          <label>スクリプト内容 (新規作成時のみ):</label>
+                                          <textarea name="script_content" rows="10" placeholder="#!/bin/sh&#10;echo &quot;Processing...&quot;&#10;exit 0"></textarea>
+                                      </div>
 
-                    <label>スクリプトパス:</label>
-                    <input type="text" value="{{.SelectedJobID}}" readonly style="background:#e0e0e0; cursor:not-allowed; width:50%;">
+                                      <label>引数 (任意):</label>
+                                      <input type="text" name="run_user" placeholder="例: 10 daily">
+                                  {{end}}
 
-                    <label>スクリプト本文 (Git連携):</label>
-                    <textarea name="script_content" rows="20" style="width:100%;">{{.ScriptContent}}</textarea>
+                                  {{if ne .NewNodeType "unit"}}
+                                      <label>待ち条件 (先行ジョブ、複数ある場合はカンマ区切り):</label>
+                                      <div class="help-text">指定したジョブが正常終了すると起動します。ジョブ名で指定してください。</div>
+                                      <input type="text" name="wait_conditions" placeholder="例: 前処理ジョブ, DB停止ジョブ">
+                                  {{end}}
 
-                    <div style="margin-top:10px;">
-                        <button type="submit">💾 ファイル保存</button>
-                        <a href="/?tab=jobs" class="btn">キャンセル</a>
-                    </div>
-                </form>
+                                  <label>個別の通知設定:</label>
+                                  <select name="notify_all">
+                                      <option value="default">デフォルト設定に従う</option>
+                                      <option value="none">例外: 通知しない</option>
+                                      <option value="both">例外: メール & Slack 両方</option>
+                                      <option value="slack">例外: Slack のみ</option>
+                                      <option value="email">例外: メール のみ</option>
+                                  </select>
 
-                <!-- 有効化 / 無効化 切り替えボタン -->
-                <form action="/action" method="POST" style="margin-top: 15px; border-top: 1px dashed #ccc; padding-top: 15px;">
-                    <input type="hidden" name="action" value="toggle_script">
-                    <input type="hidden" name="file" value="{{.SelectedJobID}}">
-                    {{if .SelectedScriptEnabled}}
-                        <button type="submit" class="btn btn-danger">🚫 実スクリプトを無効化する</button>
-                    {{else}}
-                        <button type="submit" class="btn btn-success" style="background-color: #28a745; color: white;">✅ 実スクリプトを有効化する</button>
-                    {{end}}
-                </form>
+                                  <div style="margin-top: 15px;">
+                                      <button type="submit">💾 作成して保存</button>
+                                      <a href="/?tab=jobs" class="btn">キャンセル</a>
+                                  </div>
+                              </form>
+                          </div>
+                     {{else if eq .CurrentTab "job_edit"}}
+                          <div class="view-title"><span>ジョブ定義編集: {{.SelectedNode.Name}}</span></div>
+                          <div class="view-content">
+                              {{if .ErrorMessage}}
+                                  <div class="error-message">{{.ErrorMessage}}</div>
+                              {{end}}
+                              <form action="/action" method="POST">
+                                  <input type="hidden" name="action" value="update_job">
+                                  <input type="hidden" name="id" value="{{.SelectedNode.ID}}">
 
-                <div style="margin-top:20px; padding:10px; background:#f9f9f9; border:1px solid #ccc;">
-                    <h4>このスクリプトにバインドされているジョブ</h4>
-                    {{if .SelectedNode}}
-                        <p>ジョブ: <strong>{{.SelectedNode.Name}}</strong> で設定されています。</p>
-                        <div style="display: flex; gap: 5px; align-items: center;">
-                            <form action="/action" method="POST" style="margin:0;">
-                                <input type="hidden" name="action" value="run_job">
-                                <input type="hidden" name="id" value="{{.SelectedNode.ID}}">
-                                <button type="submit" class="btn btn-primary">⚡ このジョブを実行</button>
-                            </form>
-                            <a href="/?tab=jobs&s={{.SelectedNode.ID}}" class="btn">🔍 ジョブ詳細へ移動</a>
-                        </div>
-                    {{else}}
-                        <p style="color:#666;">このスクリプトを実行するジョブは未定義です。</p>
-                        <a href="/?tab=job_new&type=job&script_preselect={{.SelectedJobID}}" class="btn btn-primary">📄 このスクリプトでジョブを作成</a>
-                    {{end}}
-                </div>
-            </div>
-        </div>
+                                  <label>名前:</label>
+                                  <input type="text" name="name" value="{{.SelectedNode.Name}}" required>
 
-    {{else if eq .CurrentTab "job_new"}}
-        <div class="pane-full">
-            <div class="view-title"><span>新規作成 ({{if eq .NewNodeType "job"}}ジョブ{{else if eq .NewNodeType "unit"}}ユニット{{else}}ジョブネット{{end}})</span></div>
-            <div class="view-content">
-                {{if .ErrorMessage}}
-                    <div class="error-message">{{.ErrorMessage}}</div>
-                {{end}}
-                <form action="/action" method="POST">
-                    <input type="hidden" name="action" value="create_job">
-                    <input type="hidden" name="type" value="{{.NewNodeType}}">
-                    <input type="hidden" name="parent_id" value="{{.ParentID}}">
+                                  {{if eq .SelectedNode.Type "job"}}
+                                      <label>実行スクリプトパス:</label>
+                                      <input type="text" name="command" value="{{.SelectedNode.Command}}" style="width: 50%;">
+                                      <span style="font-size:11px; color:#666;">（実ファイルを編集したい場合は、直接編集タブや左側メニューからファイルを選択してください）</span>
 
-                    <label>名前:</label>
-                    <input type="text" name="name" placeholder="例: バックアップ処理">
+                                      <label>引数 (任意):</label>
+                                      <input type="text" name="run_user" value="{{.SelectedNode.RunUser}}">
+                                  {{end}}
 
-                    {{if eq .NewNodeType "job"}}
-                        <label>実行スクリプトファイル:</label>
-                        <select name="script_select" id="script_select" onchange="toggleNewScriptFields()">
-                            <option value="__NEW__">＋ 新規スクリプトファイルを作成する</option>
-                            {{range .ScriptFiles}}
-                                {{if .IsEnabled}}
-                                    <option value="{{.Path}}" {{if eq .Path $.SelectedJobID}}selected{{end}}>{{.Name}} (既存ファイル)</option>
-                                {{end}}
-                            {{end}}
-                        </select>
+                                  {{if ne .SelectedNode.Type "unit"}}
+                                      <label>待ち条件 (先行ジョブ、複数ある場合はカンマ区切り):</label>
+                                      <input type="text" name="wait_conditions" value="{{.WaitConditionsStr}}" placeholder="例: 前処理ジョブ, DB停止ジョブ">
+                                  {{end}}
 
-                        <div id="new_script_fields" style="display: none;">
-                            <label>新規作成ファイル名 (新規作成時のみ):</label>
-                            <input type="text" name="script_filename" placeholder="例: backup.sh">
+                                  <label>個別の通知設定:</label>
+                                  <select name="notify_all">
+                                      <option value="default" {{if eq .SelectedNode.NotifyNormal "default"}}selected{{end}}>デフォルト設定に従う</option>
+                                      <option value="none" {{if eq .SelectedNode.NotifyNormal "none"}}selected{{end}}>例外: 通知しない</option>
+                                      <option value="both" {{if eq .SelectedNode.NotifyNormal "both"}}selected{{end}}>例外: メール & Slack 両方</option>
+                                      <option value="slack" {{if eq .SelectedNode.NotifyNormal "slack"}}selected{{end}}>例外: Slack のみ</option>
+                                      <option value="email" {{if eq .SelectedNode.NotifyNormal "email"}}selected{{end}}>例外: メール のみ</option>
+                                  </select>
 
-                            <label>スクリプト内容 (新規作成時のみ):</label>
-                            <textarea name="script_content" rows="10" placeholder="#!/bin/sh&#10;echo &quot;Processing...&quot;&#10;exit 0"></textarea>
-                        </div>
+                                  <div style="margin-top: 15px;">
+                                      <button type="submit">💾 変更を保存</button>
+                                      <a href="/?tab=jobs&s={{.SelectedNode.ID}}" class="btn">キャンセル</a>
+                                  </div>
+                              </form>
+                          </div>
+                     {{else if eq .CurrentTab "script_edit"}}
+                          <div class="view-title"><span>スクリプトファイルの直接編集: {{.SelectedJobID}}</span></div>
+                          <div class="view-content">
+                              {{if .ErrorMessage}}
+                                  <div class="error-message">{{.ErrorMessage}}</div>
+                              {{end}}
+                              <form action="/action" method="POST">
+                                  <input type="hidden" name="action" value="save_script_only">
+                                  <input type="hidden" name="filepath" value="{{.SelectedJobID}}">
 
-                        <label>引数 (任意):</label>
-                        <input type="text" name="run_user" placeholder="例: 10 daily">
-                    {{end}}
+                                  <label>スクリプトパス:</label>
+                                  <input type="text" value="{{.SelectedJobID}}" readonly style="background:#e0e0e0; cursor:not-allowed; width:50%;">
 
-                    {{if ne .NewNodeType "unit"}}
-                        <label>待ち条件 (先行ジョブ、複数ある場合はカンマ区切り):</label>
-                        <div class="help-text">指定したジョブが正常終了すると起動します。ジョブ名で指定してください。</div>
-                        <input type="text" name="wait_conditions" placeholder="例: 前処理ジョブ, DB停止ジョブ">
-                    {{end}}
+                                  <label>スクリプト本文 (Git連携):</label>
+                                  <textarea name="script_content" rows="15" style="width:100%;">{{.ScriptContent}}</textarea>
 
-                    <label>個別の通知設定:</label>
-                    <select name="notify_all">
-                        <option value="default">デフォルト設定に従う</option>
-                        <option value="none">例外: 通知しない</option>
-                        <option value="both">例外: メール & Slack 両方</option>
-                        <option value="slack">例外: Slack のみ</option>
-                        <option value="email">例外: メール のみ</option>
-                    </select>
+                                  <div style="margin-top:10px;">
+                                      <button type="submit">💾 ファイル保存</button>
+                                      <a href="/?tab=jobs" class="btn">キャンセル</a>
+                                  </div>
+                              </form>
 
-                    <div style="margin-top: 15px;">
-                        <button type="submit">💾 作成して保存</button>
-                        <a href="/?tab=jobs" class="btn">キャンセル</a>
-                    </div>
-                </form>
-            </div>
-        </div>
+                              <form action="/action" method="POST" style="margin-top: 15px; border-top: 1px dashed #ccc; padding-top: 15px;">
+                                  <input type="hidden" name="action" value="toggle_script">
+                                  <input type="hidden" name="file" value="{{.SelectedJobID}}">
+                                  {{if .SelectedScriptEnabled}}
+                                      <button type="submit" class="btn btn-danger">🚫 実スクリプトを無効化する</button>
+                                  {{else}}
+                                      <button type="submit" class="btn btn-success" style="background-color: #28a745; color: white;">✅ 実スクリプトを有効化する</button>
+                                  {{end}}
+                              </form>
 
-    {{else if eq .CurrentTab "job_edit"}}
-        <div class="pane-full">
-            <div class="view-title"><span>定義およびスクリプトの編集: {{.SelectedNode.Name}}</span></div>
-            <div class="view-content">
-                {{if .ErrorMessage}}
-                    <div class="error-message">{{.ErrorMessage}}</div>
-                {{end}}
-                <form action="/action" method="POST">
-                    <input type="hidden" name="action" value="update_job">
-                    <input type="hidden" name="id" value="{{.SelectedNode.ID}}">
+                              <div style="margin-top:20px; padding:10px; background:#f9f9f9; border:1px solid #ccc;">
+                                  <h4>このスクリプトにバインドされているジョブ</h4>
+                                  {{if .SelectedNode}}
+                                      <p>ジョブ: <strong>{{.SelectedNode.Name}}</strong> で設定されています。</p>
+                                      <div style="display: flex; gap: 5px; align-items: center;">
+                                          <form action="/action" method="POST" style="margin:0;">
+                                              <input type="hidden" name="action" value="run_job">
+                                              <input type="hidden" name="id" value="{{.SelectedNode.ID}}">
+                                              <button type="submit">⚡ ジョブの実行</button>
+                                          </form>
+                                          <a href="/?tab=jobs&s={{.SelectedNode.ID}}" class="btn">ジョブ定義を表示</a>
+                                      </div>
+                                  {{else}}
+                                      <p style="color:#666;">このスクリプトを参照している有効なジョブは現在ありません。</p>
+                                  {{end}}
+                              </div>
+                          </div>
+                     {{else}}
+                          <div class="view-title"><span>ジョブ定義[詳細]</span></div>
+                          <div class="view-content">
+                              {{if .SelectedNode}}
+                                  <h3>{{.SelectedNode.Name}}</h3>
+                                  <table border="1" cellspacing="0" cellpadding="4">
+                                      <tr><th style="width: 30%;">項目</th><th>設定値</th></tr>
+                                      <tr><th>ジョブ名</th><td>{{.SelectedNode.Name}}</td></tr>
+                                      {{if eq .SelectedNode.Type "job"}}
+                                          <tr><th>実行スクリプト</th><td><code>{{.SelectedNode.Command}}</code></td></tr>
+                                          {{if .SelectedNode.RunUser}}
+                                              <tr><th>引数</th><td><code>{{.SelectedNode.RunUser}}</code></td></tr>
+                                          {{end}}
+                                      {{end}}
+                                      {{if .SelectedNode.WaitConditions}}
+                                          <tr><th>待ち条件 (先行ジョブ)</th><td>
+                                              {{range .SelectedNode.WaitConditions}}
+                                                  {{$targetNode := index $.JobMap .JobID}}
+                                                  {{if $targetNode}}{{$targetNode.Name}}{{else}}{{.JobID}}{{end}} (正常終了待ち)<br>
+                                              {{end}}
+                                          </td></tr>
+                                      {{end}}
+                                      <tr><th>通知設定</th><td>
+                                          {{if eq .SelectedNode.NotifyNormal "default"}}デフォルト設定に従う{{else if eq .SelectedNode.NotifyNormal "none"}}例外: 通知しない{{else if eq .SelectedNode.NotifyNormal "both"}}例外: メール・Slack通知{{else if eq .SelectedNode.NotifyNormal "slack"}}例外: Slack通知{{else if eq .SelectedNode.NotifyNormal "email"}}例外: メール通知{{else}}デフォルト設定に従う{{end}}
+                                      </td></tr>
+                                  </table>
 
-                    <label>名前:</label>
-                    <input type="text" name="name" value="{{.SelectedNode.Name}}" required>
-
-                    {{if eq .SelectedNode.Type "job"}}
-                        <label>実行スクリプトファイル:</label>
-                        <input type="text" name="command" value="{{.SelectedNode.Command}}" readonly style="background:#e0e0e0; cursor:not-allowed;">
-
-                        <label>スクリプト本文の編集 (Git連携):</label>
-                        <textarea name="script_content" rows="15">{{.ScriptContent}}</textarea>
-
-                        <label>引数 (任意):</label>
-                        <input type="text" name="run_user" value="{{.SelectedNode.RunUser}}" placeholder="例: 10 daily">
-                    {{end}}
-
-                    {{if ne .SelectedNode.Type "unit"}}
-                        <label>待ち条件 (先行ジョブ、複数ある場合はカンマ区切り):</label>
-                        <div class="help-text">ジョブ名で指定してください。</div>
-                        <input type="text" name="wait_conditions" value="{{.WaitConditionsStr}}" placeholder="例: 前処理ジョブ">
-                    {{end}}
-
-                    <label>個別の通知設定:</label>
-                    <select name="notify_all">
-                        <option value="default" {{if or (eq .SelectedNode.NotifyNormal "default") (eq .SelectedNode.NotifyNormal "")}}selected{{end}}>デフォルト設定に従う</option>
-                        <option value="none" {{if eq .SelectedNode.NotifyNormal "none"}}selected{{end}}>例外: 通知しない</option>
-                        <option value="both" {{if eq .SelectedNode.NotifyNormal "both"}}selected{{end}}>例外: メール & Slack 両方</option>
-                        <option value="slack" {{if eq .SelectedNode.NotifyNormal "slack"}}selected{{end}}>例外: Slack のみ</option>
-                        <option value="email" {{if eq .SelectedNode.NotifyNormal "email"}}selected{{end}}>例外: メール のみ</option>
-                    </select>
-
-                    <div style="margin-top: 15px;">
-                        <button type="submit">💾 変更を保存</button>
-                        <a href="/?tab=jobs&s={{.SelectedNode.ID}}" class="btn">キャンセル</a>
-                    </div>
-                </form>
-            </div>
-        </div>
-
-    {{else if eq .CurrentTab "schedules"}}
-        <!-- スケジュール設定ペイン -->
-        <div class="pane-full">
-            <div class="view-title">
-                <span>スケジュール[実行規則]</span>
-                <a href="/?tab=schedules" class="refresh-icon">🔄 更新</a>
-            </div>
-            <div class="view-content">
-                <table border="1" cellspacing="0" cellpadding="4">
-                    <thead>
-                        <tr>
-                            <th>スケジュール名</th>
-                            <th>実行対象ユニット/ジョブ</th>
-                            <th>スケジュール設定</th>
-                            <th>状態</th>
-                            <th>操作</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {{range .Schedules}}
-                            <tr>
-                                <td>{{.Name}}</td>
-                                <td>
-                                    {{$targetUnit := index $.JobMap .JobID}}
-                                    {{if $targetUnit}}
-                                        {{$targetUnit.Name}}
-                                    {{else}}
-                                        <span style="color: red; font-weight: bold;">⚠️ 存在しないジョブ: {{.JobID}}</span>
-                                    {{end}}
-                                </td>
-                                <td>
-                                    {{if eq .Type "weekly"}}毎週: {{if eq .Weekday "0"}}日曜日{{else if eq .Weekday "1"}}月曜日{{else if eq .Weekday "2"}}火曜日{{else if eq .Weekday "3"}}水曜日{{else if eq .Weekday "4"}}木曜日{{else if eq .Weekday "5"}}金曜日{{else if eq .Weekday "6"}}土曜日{{else}}毎日{{end}} @ {{.Hour}}:{{.Minute}}{{else if eq .Type "daily"}}毎日 @ {{.Hour}}:{{.Minute}}{{else if eq .Type "hourly"}}毎時: {{.Minute}}分から {{.Interval}}分間隔{{else if eq .Type "interval"}}一定間隔: {{.Hour}}:{{.Minute}}から {{.Interval}}分間隔{{else if eq .Type "cron"}}crontab 形式: <code>{{.CronExpr}}</code>{{else}}日時指定: {{.Month}}/{{.Day}} @ {{.Hour}}:{{.Minute}}{{end}}
-                                </td>
-                                <td>
-                                    {{if .Enabled}}<span class="badge status-success">有効</span>{{else}}<span class="badge status-hold">無効</span>{{end}}
-                                </td>
-                                <td>
-                                    <form action="/action" method="POST" style="display:inline;">
-                                        <input type="hidden" name="action" value="toggle_schedule">
-                                        <input type="hidden" name="id" value="{{.ID}}">
-                                        <button type="submit" class="btn">{{if .Enabled}}無効化{{else}}有効化{{end}}</button>
-                                    </form>
-                                    <form action="/action" method="POST" style="display:inline;">
-                                        <input type="hidden" name="action" value="delete_schedule">
-                                        <input type="hidden" name="id" value="{{.ID}}">
-                                        <button type="submit" class="btn btn-danger">削除</button>
-                                    </form>
-                                </td>
-                            </tr>
-                        {{else}}
-                            <tr><td colspan="5">スケジュールが設定されていません。</td></tr>
-                        {{end}}
-                    </tbody>
-                </table>
-
-                <h3 style="margin-top:20px;">新規スケジュールの追加</h3>
-                <form action="/action" method="POST">
-                    <input type="hidden" name="action" value="create_schedule">
-                    
-                    <label>スケジュール名:</label>
-                    <input type="text" name="name" required placeholder="例: 毎日夜間バックアップ">
-
-                    <label>実行対象ユニット/ジョブ:</label>
-                    <select name="job_id">
-                        {{range .UnitOptions}}
-                            <option value="{{.ID}}">{{.Name}}</option>
-                        {{end}}
-                    </select>
-
-                    <label>スケジュール種別 (ラジオボタンで選択):</label>
-                    <div style="display: flex; flex-direction: column; gap: 5px; margin-bottom: 10px;">
-                        <label style="display:inline-flex; align-items:center; font-weight:normal; margin-top:2px;">
-                            <input type="radio" name="type" value="cron" checked onclick="updateScheduleForm()"> crontab形式 (分 時 日 月 曜日)
-                        </label>
-                        <label style="display:inline-flex; align-items:center; font-weight:normal; margin-top:2px;">
-                            <input type="radio" name="type" value="daily" onclick="updateScheduleForm()"> 毎日 (特定の時間に実行)
-                        </label>
-                        <label style="display:inline-flex; align-items:center; font-weight:normal; margin-top:2px;">
-                            <input type="radio" name="type" value="weekly" onclick="updateScheduleForm()"> 毎週 (特定の曜日・時間に実行)
-                        </label>
-                        <label style="display:inline-flex; align-items:center; font-weight:normal; margin-top:2px;">
-                            <input type="radio" name="type" value="hourly" onclick="updateScheduleForm()"> 毎時 (指定間隔で繰り返し)
-                        </label>
-                        <label style="display:inline-flex; align-items:center; font-weight:normal; margin-top:2px;">
-                            <input type="radio" name="type" value="interval" onclick="updateScheduleForm()"> 一定間隔 (指定間隔で繰り返し)
-                        </label>
-                        <label style="display:inline-flex; align-items:center; font-weight:normal; margin-top:2px;">
-                            <input type="radio" name="type" value="datetime" onclick="updateScheduleForm()"> 日時指定 (特定の年月日・時間に実行)
-                        </label>
-                    </div>
-
-                    <label>実行日付 (日時指定用 - カレンダー選択):</label>
-                    <input type="date" name="run_date" id="input_run_date" style="font-family: inherit; font-size: 12px; padding: 2px;">
-
-                    <label>crontab設定 (crontab形式時のみ、例: <code>*/15 * * * *</code>):</label>
-                    <input type="text" name="cron_expr" id="input_cron_expr" placeholder="例: */15 * * * *">
-
-                    <label>曜日 (毎週指定用、0=日, 1=月, 2=火, 3=水, 4=木, 5=金, 6=土, * = 毎日):</label>
-                    <input type="text" name="weekday" id="input_weekday" value="*">
-
-                    <label>開始時刻 (時間 hh : 分 mm):</label>
-                    <div style="display: flex; gap: 5px; align-items: center;">
-                        <input type="text" name="hour" id="input_hour" placeholder="hh" style="width: 50px;" value="18"> : 
-                        <input type="text" name="minute" id="input_minute" placeholder="mm" style="width: 50px;" value="00">
-                    </div>
-
-                    <label>実行間隔 (分、毎時・一定間隔用):</label>
-                    <input type="text" name="interval" id="input_interval" placeholder="例: 15">
-
-                    <button type="submit" style="margin-top:10px;">💾 スケジュール登録</button>
-                </form>
-                <hr style="margin-top:30px;">
-                <h3>📝 スケジュール一括登録・編集 (crontab -e 風)</h3>
-                <form action="/action" method="POST">
-                    <input type="hidden" name="action" value="save_schedules_bulk">
-                    <label>スケジュールリスト (形式: <code>分 時 日 月 曜日 ジョブID # スケジュール名</code>):</label>
-                    <div class="help-text">
-                        1行に1スケジュールずつ記述してください。標準の crontab 形式の末尾に、実行対象のジョブIDをスペース区切りで指定し、<code>#</code> の後にスケジュール名を記述します。<br>
-                        既存の行を編集すると更新され、行を削除するとそのスケジュールが一括削除されます。
-                    </div>
-                    <textarea name="schedules_cron" rows="15" style="width:100%; font-family:monospace;" placeholder="例:&#10;*/15 * * * * job_12345678 # 15分ごと定期実行&#10;0 18 * * * job_98765432 # 毎日18時バックアップ">{{.ScriptContent}}</textarea>
-                    <div style="margin-top:15px;">
-                        <button type="submit" class="btn btn-primary">💾 スケジュール一括保存 (適用)</button>
-                    </div>
-                </form>
-            </div>
-        </div>
-
-    {{else if eq .CurrentTab "history"}}
-        <!-- 履歴・キューペイン -->
-        <div class="pane-left">
-            <div class="view-title">
-                <span>ジョブ[履歴]</span>
-                <a href="/?tab=history{{if .SelectedSessionID}}&session_id={{.SelectedSessionID}}{{end}}" class="refresh-icon">🔄 更新</a>
-            </div>
-            
-            <!-- 検索・期間フィルタ -->
-            <div style="background:#e8f0fe; border-bottom:1px solid #ccc; padding:6px 10px;">
-                <form action="/" method="GET" style="margin:0; display:flex; flex-direction:column; gap:5px;">
-                    <input type="hidden" name="tab" value="history">
-                    <div style="display:flex; gap:5px;">
-                        <input type="text" name="keyword" value="{{.ScriptContent}}" placeholder="キーワードを入力..." style="flex:1;">
-                        <button type="submit">検索</button>
-                        <a href="/?tab=history" class="btn" style="padding:2px 5px;">クリア</a>
-                    </div>
-                    <div style="display:flex; align-items:center; gap:2px; font-size:10px;">
-                        <span>開始:</span>
-                        <input type="text" name="start_date" placeholder="2026-07-03" style="width:75px;" value="{{.SelectedJobID}}">
-                        <span>~ 終了:</span>
-                        <input type="text" name="end_date" placeholder="2026-07-04" style="width:75px;" value="{{.WaitConditionsStr}}">
-                    </div>
-                </form>
+                                  <div style="margin-top: 15px; display: flex; gap: 5px;">
+                                      {{if or (eq .SelectedNode.Type "unit") (and (eq .SelectedNode.Type "job") .SelectedNode.Command)}}
+                                          <form action="/action" method="POST" style="margin:0;">
+                                              <input type="hidden" name="action" value="run_job">
+                                              <input type="hidden" name="id" value="{{.SelectedNode.ID}}">
+                                              <button type="submit">⚡ ジョブの実行</button>
+                                          </form>
+                                      {{end}}
+                                      <a href="/?tab=job_edit&id={{.SelectedNode.ID}}" class="btn">✏️ 変更 / スクリプト編集</a>
+                                      {{if or (eq .SelectedNode.Type "unit") (eq .SelectedNode.Type "net")}}
+                                          <a href="/?tab=job_new&type=net&parent={{.SelectedNode.ID}}" class="btn">📂 下位ネット作成</a>
+                                          <a href="/?tab=job_new&type=job&parent={{.SelectedNode.ID}}" class="btn btn-primary">📄 下位ジョブ作成</a>
+                                      {{end}}
+                                      <form action="/action" method="POST" style="margin:0;">
+                                          <input type="hidden" name="action" value="delete_job">
+                                          <input type="hidden" name="id" value="{{.SelectedNode.ID}}">
+                                          <button type="submit" class="btn btn-danger" onclick="return confirm('本当に削除しますか？');">🗑️ 削除</button>
+                                      </form>
+                                  </div>
+                              {{else}}
+                                  <p>左側のツリーからジョブを選択してください。実スクリプトファイル名をクリックすると、スクリプトの直接編集が可能です。</p>
+                              {{end}}
+                          </div>
+                     {{end}}
+                 </div>
             </div>
 
-            <div class="view-content" style="padding:0;">
-                <table border="1" cellspacing="0" cellpadding="4" style="margin:0; border:none; width:100%;">
-                    <thead>
-                        <tr>
-                            <th>セッション ID / ジョブ名</th>
-                            <th>状態</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {{range .Sessions}}
-                            <tr {{if eq .SessionID $.SelectedSessionID}}style="background:#d0e7dd;"{{end}}>
-                                <td>
-                                    <a href="/?tab=history&session_id={{.SessionID}}">
-                                        {{.SessionID}}<br>
-                                        <small>{{.UnitName}}</small>
-                                    </a>
-                                </td>
-                                <td>
-                                    <span class="badge {{if eq .Status "実行中"}}status-running{{else if eq .Status "正常終了"}}status-success{{else if eq .Status "警告終了"}}status-warn{{else}}status-error{{end}}">
-                                        {{.Status}}
-                                    </span>
-                                </td>
-                            </tr>
-                        {{else}}
-                            <tr><td colspan="2" style="padding:10px;">条件に一致する履歴はありません。</td></tr>
-                        {{end}}
-                    </tbody>
-                </table>
+            <!-- 2. ジョブ履歴セクション -->
+            <div class="split-section" style="min-height: 250px; display: flex; flex-direction: row; gap: 5px; height: 300px;">
+                 <div style="flex: 3; overflow-y: auto; padding: 10px; border-right: 1px solid #ccc; height: 100%; box-sizing: border-box;">
+                     <div class="view-title" style="margin: -10px -10px 10px -10px;">
+                         <span>📊 ジョブ履歴</span>
+                         <a href="/?tab=jobs" class="refresh-icon">🔄 更新</a>
+                     </div>
+                     <form action="/" method="GET" style="display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px; font-size:12px;">
+                         <input type="hidden" name="tab" value="{{$.CurrentTab}}">
+                         {{if $.SelectedJobID}}<input type="hidden" name="s" value="{{$.SelectedJobID}}">{{end}}
+                         <input type="text" name="keyword" placeholder="キーワード検索" value="{{.HistoryKeyword}}" style="padding:2px; font-size:12px; width:120px;">
+                         <input type="date" name="start_date" value="{{.SelectedJobID}}" style="padding:2px; font-size:12px;">
+                         <span>～</span>
+                         <input type="date" name="end_date" value="{{.WaitConditionsStr}}" style="padding:2px; font-size:12px;">
+                         <button type="submit" style="padding:2px 8px; font-size:12px;">検索</button>
+                         <a href="/?tab=jobs" style="padding:2px; font-size:12px;">クリア</a>
+                     </form>
+
+                     <table border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:12px;">
+                         <thead>
+                             <tr>
+                                 <th>セッションID</th>
+                                 <th>ユニット名</th>
+                                 <th>開始日時</th>
+                                 <th>状態</th>
+                             </tr>
+                         </thead>
+                         <tbody>
+                             {{range .Sessions}}
+                                 <tr class="{{if eq .SessionID $.SelectedSessionID}}tree-active{{end}}">
+                                     <td><a href="/?tab={{$.CurrentTab}}&session_id={{.SessionID}}{{if $.SelectedJobID}}&s={{$.SelectedJobID}}{{end}}">{{.SessionID}}</a></td>
+                                     <td>{{.UnitName}}</td>
+                                     <td>{{.StartDate}}</td>
+                                     <td>
+                                         {{if eq .Status "正常終了"}}<span class="badge status-success">正常終了</span>
+                                         {{else if eq .Status "異常終了"}}<span class="badge status-danger">異常終了</span>
+                                         {{else if eq .Status "警告終了"}}<span class="badge status-hold">警告終了</span>
+                                         {{else}}<span class="badge status-run">実行中</span>{{end}}
+                                     </td>
+                                 </tr>
+                             {{else}}
+                                 <tr><td colspan="4">履歴がありません。</td></tr>
+                             {{end}}
+                         </tbody>
+                     </table>
+                 </div>
+
+                 <div style="flex: 2; overflow-y: auto; padding: 10px; height: 100%; box-sizing: border-box;">
+                     {{if .SelectedSession}}
+                         <div class="view-title" style="margin: -10px -10px 10px -10px;"><span>セッション詳細: {{.SelectedSessionID}}</span></div>
+                         <div style="font-size:12px; margin-bottom:10px;">
+                             <strong>全体状態:</strong> 
+                             {{if eq .SelectedSession.Status "正常終了"}}<span class="badge status-success">正常終了</span>
+                             {{else if eq .SelectedSession.Status "異常終了"}}<span class="badge status-danger">異常終了</span>
+                             {{else if eq .SelectedSession.Status "警告終了"}}<span class="badge status-hold">警告終了</span>
+                             {{else}}<span class="badge status-run">実行中</span>{{end}}
+                             (正常: {{.GreenCount}} / 警告: {{.YellowCount}} / 異常: {{.RedCount}} / 合計: {{.TotalCount}})
+                         </div>
+
+                         <div class="topology-map" style="padding:10px; font-size:11px; margin-bottom:10px; max-height:120px; overflow-y:auto;">
+                             {{range .SessionNodes}}
+                                 <span class="topo-node {{if eq .Node.Status "実行中"}}flow-node-run{{else if eq .Node.Status "未実施"}}flow-node-unknown{{else if eq .Node.Status "起動失敗"}}flow-node-error{{else if eq .StatusLabel "正常終了"}}flow-node-success{{else if eq .StatusLabel "警告終了"}}flow-node-warn{{else if eq .StatusLabel "異常終了"}}flow-node-error{{else}}flow-node-success{{end}}">
+                                     <a href="/?tab={{$.CurrentTab}}&session_id={{$.SelectedSessionID}}&show_log={{.Node.JobID}}{{if $.SelectedJobID}}&s={{$.SelectedJobID}}{{end}}" style="color:inherit;">{{.Node.Name}} [{{if eq .Node.Status "終了"}}{{.StatusLabel}}{{else}}{{.Node.Status}}{{end}}]</a>
+                                 </span>
+                                 <span class="flow-arrow">→</span>
+                             {{end}}
+                             <span>完了</span>
+                         </div>
+
+                         {{if .ShowLogNode}}
+                             <h5 style="margin:5px 0;">ログ: {{.ShowLogNode.Name}} (終了コード: {{.ShowLogNode.ExitValue}})</h5>
+                             <textarea readonly rows="6" style="width:100%; font-family:monospace; font-size:11px; background:#fafafa;">{{.ShowLogNode.LogOutput}}</textarea>
+                         {{else}}
+                             <p style="color:#666; font-size:11px;">フロー内のジョブ名をクリックすると実行ログが表示されます。</p>
+                         {{end}}
+                     {{else}}
+                         <p style="color:#666; font-size:12px;">履歴一覧からセッションを選択すると詳細が表示されます。</p>
+                     {{end}}
+                 </div>
             </div>
-            
-            <!-- 下部ステータス集計バー (フィルタボタン化) -->
-            <div class="summary-bar">
-                <a href="/?tab=history&filter_status=異常終了" class="summary-item summary-red">危険: {{.RedCount}}</a>
-                <a href="/?tab=history&filter_status=警告終了" class="summary-item summary-yellow">警告: {{.YellowCount}}</a>
-                <a href="/?tab=history&filter_status=正常終了" class="summary-item summary-green">情報: {{.GreenCount}}</a>
-                <a href="/?tab=history&filter_status=実行中" class="summary-item summary-blue">不明: {{.BlueCount}}</a>
-                <div class="summary-count">表示件数: {{.TotalCount}}</div>
+
+            <!-- 3. スケジュール設定セクション -->
+            <div class="split-section" style="min-height: 300px; display: flex; flex-direction: row; gap: 5px; height: 350px; overflow-y: auto;">
+                 <div style="flex: 1.5; padding: 10px; border-right: 1px solid #ccc; height: 100%; box-sizing: border-box; overflow-y: auto;">
+                     <div class="view-title" style="margin: -10px -10px 10px -10px;">
+                         <span>📅 スケジュール一覧</span>
+                         <a href="/?tab=jobs" class="refresh-icon">🔄 更新</a>
+                     </div>
+                     <table border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:12px;">
+                         <thead>
+                             <tr>
+                                 <th>スケジュール名</th>
+                                 <th>実行対象ユニット/ジョブ</th>
+                                 <th>設定</th>
+                                 <th>状態</th>
+                                 <th>操作</th>
+                             </tr>
+                         </thead>
+                         <tbody>
+                             {{range .Schedules}}
+                                 <tr>
+                                     <td>{{.Name}}</td>
+                                     <td>
+                                         {{$targetUnit := index $.JobMap .JobID}}
+                                         {{if $targetUnit}}
+                                             {{$targetUnit.Name}}
+                                         {{else}}
+                                             <span style="color: red; font-weight: bold;">⚠️ 存在しないジョブ: {{.JobID}}</span>
+                                         {{end}}
+                                     </td>
+                                     <td>
+                                         {{if eq .Type "weekly"}}毎週: {{if eq .Weekday "0"}}日曜日{{else if eq .Weekday "1"}}月曜日{{else if eq .Weekday "2"}}火曜日{{else if eq .Weekday "3"}}水曜日{{else if eq .Weekday "4"}}木曜日{{else if eq .Weekday "5"}}金曜日{{else if eq .Weekday "6"}}土曜日{{else}}毎日{{end}} @ {{.Hour}}:{{.Minute}}
+                                         {{else if eq .Type "daily"}}毎日 @ {{.Hour}}:{{.Minute}}
+                                         {{else if eq .Type "hourly"}}毎時: {{.Minute}}分から {{.Interval}}分間隔
+                                         {{else if eq .Type "interval"}}一定間隔: {{.Hour}}:{{.Minute}}から {{.Interval}}分間隔
+                                         {{else if eq .Type "cron"}}crontab: <code>{{.CronExpr}}</code>
+                                         {{else}}日時指定: {{.Month}}/{{.Day}} @ {{.Hour}}:{{.Minute}}{{end}}
+                                     </td>
+                                     <td>
+                                         {{if .Enabled}}<span class="badge status-success">有効</span>{{else}}<span class="badge status-hold">無効</span>{{end}}
+                                     </td>
+                                     <td>
+                                         <form action="/action" method="POST" style="display:inline;">
+                                             <input type="hidden" name="action" value="toggle_schedule">
+                                             <input type="hidden" name="id" value="{{.ID}}">
+                                             <button type="submit" class="btn">{{if .Enabled}}無効化{{else}}有効化{{end}}</button>
+                                         </form>
+                                         <form action="/action" method="POST" style="display:inline;">
+                                             <input type="hidden" name="action" value="delete_schedule">
+                                             <input type="hidden" name="id" value="{{.ID}}">
+                                             <button type="submit" class="btn btn-danger">削除</button>
+                                         </form>
+                                     </td>
+                                 </tr>
+                             {{else}}
+                                 <tr><td colspan="5">スケジュールが設定されていません。</td></tr>
+                             {{end}}
+                         </tbody>
+                     </table>
+
+                     <h4 style="margin-top:20px;">📝 スケジュール一括登録・編集 (crontab -e 互換)</h4>
+                     <form action="/action" method="POST">
+                         <input type="hidden" name="action" value="save_schedules_bulk">
+                         <textarea name="schedules_cron" rows="6" style="width:100%; font-family:monospace; font-size:12px;">{{.SchedulesCronText}}</textarea>
+                         <div style="margin-top:5px;">
+                             <button type="submit" class="btn btn-primary" style="font-size:12px; padding:3px 10px;">💾 スケジュール一括保存 (適用)</button>
+                         </div>
+                     </form>
+                 </div>
+
+                 <div style="flex: 1; padding: 10px; height: 100%; box-sizing: border-box; overflow-y: auto; font-size:12px;">
+                     <div class="view-title" style="margin: -10px -10px 10px -10px;"><span>➕ スケジュール追加</span></div>
+                     <form action="/action" method="POST">
+                         <input type="hidden" name="action" value="create_schedule">
+                         
+                         <label style="margin-top:3px;">スケジュール名:</label>
+                         <input type="text" name="name" required placeholder="例: 夜間バックアップ" style="width:100%; font-size:12px; padding:2px;">
+
+                         <label style="margin-top:5px;">実行対象ジョブ:</label>
+                         <select name="job_id" style="width:100%; font-size:12px; padding:2px;">
+                             {{range .UnitOptions}}
+                                 <option value="{{.ID}}">{{.Name}}</option>
+                             {{end}}
+                         </select>
+
+                         <label style="margin-top:5px;">設定タイプ:</label>
+                         <div style="display: flex; flex-direction: column; gap: 2px; margin-bottom: 5px;">
+                             <label style="font-weight:normal; margin-top:2px; font-size:12px;"><input type="radio" name="type" value="cron" checked onclick="updateScheduleForm()"> crontab形式</label>
+                             <label style="font-weight:normal; margin-top:2px; font-size:12px;"><input type="radio" name="type" value="daily" onclick="updateScheduleForm()"> 毎日</label>
+                             <label style="font-weight:normal; margin-top:2px; font-size:12px;"><input type="radio" name="type" value="weekly" onclick="updateScheduleForm()"> 毎週</label>
+                             <label style="font-weight:normal; margin-top:2px; font-size:12px;"><input type="radio" name="type" value="hourly" onclick="updateScheduleForm()"> 毎時</label>
+                             <label style="font-weight:normal; margin-top:2px; font-size:12px;"><input type="radio" name="type" value="interval" onclick="updateScheduleForm()"> 一定間隔</label>
+                             <label style="font-weight:normal; margin-top:2px; font-size:12px;"><input type="radio" name="type" value="datetime" onclick="updateScheduleForm()"> 日時指定</label>
+                         </div>
+
+                         <label style="margin-top:3px;">日付 (日時指定用):</label>
+                         <input type="date" name="run_date" id="input_run_date" style="width:100%; font-size:12px; padding:2px;">
+
+                         <label style="margin-top:3px;">crontab設定 (例: <code>*/15 * * * *</code>):</label>
+                         <input type="text" name="cron_expr" id="input_cron_expr" placeholder="*/15 * * * *" style="width:100%; font-size:12px; padding:2px;">
+
+                         <label style="margin-top:3px;">曜日 (毎週用, 0=日, 1=月, ...):</label>
+                         <input type="text" name="weekday" id="input_weekday" value="*" style="width:100%; font-size:12px; padding:2px;">
+
+                         <label style="margin-top:3px;">開始時刻 (hh:mm):</label>
+                         <div style="display: flex; gap: 5px; align-items: center;">
+                             <input type="text" name="hour" id="input_hour" placeholder="hh" value="18" style="width: 40px; font-size:12px; padding:2px;"> : 
+                             <input type="text" name="minute" id="input_minute" placeholder="mm" value="00" style="width: 40px; font-size:12px; padding:2px;">
+                         </div>
+
+                         <label style="margin-top:3px;">間隔時間 (毎時/一定間隔用・分):</label>
+                         <input type="text" name="interval" id="input_interval" placeholder="15" style="width:100%; font-size:12px; padding:2px;">
+
+                         <button type="submit" style="margin-top:8px; width:100%; padding:4px;">➕ 登録</button>
+                     </form>
+                 </div>
             </div>
         </div>
 
-        <div class="pane-right">
-            <div class="view-title">
-                <span>ジョブ[ジョブ詳細]</span>
+    {{else if or (eq .CurrentTab "nodes") (eq .CurrentTab "topology") (eq .CurrentTab "monitors") (eq .CurrentTab "nodes_manage") (eq .CurrentTab "node_new")}}
+        <!-- ノード・監視管理 統合画面 -->
+        <div class="split-layout">
+            <!-- 1. ノード一覧セクション -->
+            <div class="split-section" style="min-height: 300px; display: flex; flex-direction: row; gap: 5px; height: 350px;">
+                 <div style="flex: 1.5; padding: 10px; border-right: 1px solid #ccc; height: 100%; box-sizing: border-box; overflow-y: auto;">
+                     <div class="view-title" style="margin: -10px -10px 10px -10px;">
+                         <span>🖥️ ノード一覧</span>
+                         <a href="/?tab=nodes" class="refresh-icon">🔄 更新</a>
+                     </div>
+                     <table border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:12px;">
+                         <thead>
+                             <tr>
+                                 <th>ノード名</th>
+                                 <th>IPアドレス</th>
+                                 <th>状態 (監視)</th>
+                             </tr>
+                         </thead>
+                         <tbody>
+                             {{range .Nodes}}
+                                 <tr class="{{if eq .ID $.SelectedNodeID}}tree-active{{end}}">
+                                     <td><a href="/?tab={{$.CurrentTab}}&s={{.ID}}">{{.Name}}</a></td>
+                                     <td>{{.IPAddress}}</td>
+                                     <td>
+                                         {{if eq .Description "正常"}}<span class="badge status-success">正常</span>
+                                         {{else if eq .Description "異常"}}<span class="badge status-danger">異常</span>
+                                         {{else}}<span class="badge status-unknown">未実施 / 不明</span>{{end}}
+                                     </td>
+                                 </tr>
+                             {{else}}
+                                 <tr><td colspan="3">登録ノードがありません。</td></tr>
+                             {{end}}
+                         </tbody>
+                     </table>
+
+                     <h4 style="margin-top:20px;">📝 ノード一括登録・編集 (CSV形式)</h4>
+                     <form action="/action" method="POST">
+                         <input type="hidden" name="action" value="save_nodes_bulk">
+                         <textarea name="nodes_csv" rows="6" style="width:100%; font-family:monospace; font-size:12px;">{{.NodeCsvText}}</textarea>
+                         <div style="margin-top:5px;">
+                             <button type="submit" class="btn btn-primary" style="font-size:12px; padding:3px 10px;">💾 ノード一括保存 (適用)</button>
+                         </div>
+                     </form>
+                 </div>
+
+                 <div style="flex: 1; padding: 10px; height: 100%; box-sizing: border-box; overflow-y: auto; font-size:12px;">
+                     {{if .SelectedNodeData}}
+                         <div class="view-title" style="margin: -10px -10px 10px -10px;"><span>ノード詳細: {{.SelectedNodeData.Name}}</span></div>
+                         <table border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:12px; margin-bottom:10px;">
+                             <tr><th>IPアドレス</th><td>{{.SelectedNodeData.IPAddress}}</td></tr>
+                             <tr><th>プラットフォーム</th><td>{{.SelectedNodeData.Platform}}</td></tr>
+                             <tr><th>説明</th><td>{{.SelectedNodeData.Description}}</td></tr>
+                         </table>
+
+                         <h5 style="margin:10px 0 5px 0;">このノードの監視設定</h5>
+                         <table border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:11px;">
+                             <thead>
+                                 <tr><th>監視項目</th><th>閾値</th><th>状態</th></tr>
+                             </thead>
+                             <tbody>
+                                 {{range .NodeMonitors}}
+                                     <tr>
+                                         <td>{{.Type}} ({{.Target}})</td>
+                                         <td>{{.Operator}} {{.ThresholdValue}}</td>
+                                         <td>
+                                             {{if eq .LastStatus "正常"}}<span class="badge status-success">正常</span>
+                                             {{else if eq .LastStatus "異常"}}<span class="badge status-danger">異常</span>
+                                             {{else}}<span class="badge status-unknown">未判定</span>{{end}}
+                                         </td>
+                                     </tr>
+                                 {{else}}
+                                     <tr><td colspan="3">このノードに対する監視設定はありません。</td></tr>
+                                 {{end}}
+                             </tbody>
+                         </table>
+
+                         <div style="margin-top:15px; display:flex; gap:5px;">
+                             <form action="/action" method="POST" style="margin:0;">
+                                 <input type="hidden" name="action" value="delete_node">
+                                 <input type="hidden" name="id" value="{{.SelectedNodeData.ID}}">
+                                 <button type="submit" class="btn btn-danger" onclick="return confirm('本当にこのノードを削除しますか？紐づく監視設定も削除されます。');">🗑️ ノード削除</button>
+                             </form>
+                             <a href="/?tab={{$.CurrentTab}}" class="btn">クリア</a>
+                         </div>
+                     {{else}}
+                         <div class="view-title" style="margin: -10px -10px 10px -10px;"><span>➕ 新規ノード登録</span></div>
+                         <form action="/action" method="POST">
+                             <input type="hidden" name="action" value="create_node">
+                             
+                             <label style="margin-top:3px;">ノード名:</label>
+                             <input type="text" name="name" required placeholder="例: DBサーバ" style="width:100%; font-size:12px; padding:2px;">
+
+                             <label style="margin-top:5px;">IPアドレス:</label>
+                             <input type="text" name="ip_address" required placeholder="例: 192.168.1.10" style="width:100%; font-size:12px; padding:2px;">
+
+                             <label style="margin-top:5px;">プラットフォーム:</label>
+                             <select name="platform" style="width:100%; font-size:12px; padding:2px;">
+                                 <option value="linux">Linux</option>
+                                 <option value="windows">Windows</option>
+                             </select>
+
+                             <label style="margin-top:5px;">説明:</label>
+                             <input type="text" name="description" placeholder="用途など" style="width:100%; font-size:12px; padding:2px;">
+
+                             <button type="submit" style="margin-top:10px; width:100%; padding:4px;">➕ 登録</button>
+                         </form>
+                     {{end}}
+                 </div>
             </div>
-            <div class="view-content">
-                {{if .SelectedSession}}
-                    <table border="1" cellspacing="0" cellpadding="4">
-                        <tr><th style="width:30%;">ジョブユニット</th><td>{{.SelectedSession.UnitName}}</td></tr>
-                        <tr><th>実行契機</th><td>{{.SelectedSession.TriggerType}} ({{.SelectedSession.TriggerInfo}})</td></tr>
-                        <tr><th>開始時刻</th><td>{{.SelectedSession.StartDate}}</td></tr>
-                        <tr><th>終了時刻</th><td>{{.SelectedSession.EndDate}}</td></tr>
-                        <tr><th>総合終了状態</th><td>
-                            <span class="badge {{if eq .SelectedSession.Status "実行中"}}status-running{{else if eq .SelectedSession.Status "正常終了"}}status-success{{else if eq .SelectedSession.Status "警告終了"}}status-warn{{else}}status-error{{end}}">
-                                {{.SelectedSession.Status}}
-                            </span>
-                        </td></tr>
-                        <tr><th>総合終了値</th><td>{{.SelectedSession.ExitValue}}</td></tr>
-                    </table>
 
-                    <!-- ジョブユニットの進捗状態 (グラフィカルフローマップ) -->
-                    <h3>ジョブ実行フロー・進捗状況</h3>
-                    <div class="flow-container">
-                        {{range $idx, $node := .SessionNodes}}
-                            {{if $idx}}<div class="flow-arrow">→</div>{{end}}
-                            <div class="flow-node {{if eq .Node.Status "待機中"}}flow-node-wait{{else if eq .Node.Status "実行中"}}flow-node-run{{else if eq .Node.Status "終了"}}{{if eq .StatusLabel "正常終了"}}flow-node-success{{else if eq .StatusLabel "警告終了"}}flow-node-warn{{else}}flow-node-error{{end}}{{else}}flow-node-wait{{end}}">
-                                {{.Node.Name}}<br>
-                                <small>({{.Node.Status}}{{if eq .Node.Status "終了"}}: {{.StatusLabel}}{{end}})</small>
-                            </div>
-                        {{end}}
-                    </div>
-
-                    <h3 style="margin-top:15px;">ノード実行ステータス</h3>
-                    <table border="1" cellspacing="0" cellpadding="4">
-                        <thead>
-                            <tr>
-                                <th>ジョブ名称</th>
-                                <th>状態</th>
-                                <th>終了値</th>
-                                <th>ログ / 操作</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {{range .SessionNodes}}
-                                <tr>
-                                    <td>
-                                        <strong>{{.Node.Name}}</strong>
-                                    </td>
-                                    <td>
-                                        <span class="badge {{if eq .Node.Status "実行中"}}status-running{{else if eq .Node.Status "終了"}}{{if eq .StatusLabel "正常終了"}}status-success{{else if eq .StatusLabel "警告終了"}}status-warn{{else}}status-error{{end}}{{else if eq .Node.Status "保留中"}}status-hold{{else}}status-error{{end}}">
-                                            {{if eq .Node.Status "終了"}}{{.StatusLabel}}{{else}}{{.Node.Status}}{{end}}
-                                        </span>
-                                    </td>
-                                    <td>{{if eq .Node.Status "待機中"}}-{{else}}{{.Node.ExitValue}}{{end}}</td>
-                                    <td>
-                                        {{if .Node.Log}}
-                                            <a href="/?tab=history&session_id={{$.SelectedSession.SessionID}}&show_log={{.Node.JobID}}">[ログ表示]</a>
-                                        {{end}}
-                                        {{if eq .Node.Status "実行中"}}
-                                            <form action="/action" method="POST" style="display:inline;">
-                                                <input type="hidden" name="action" value="stop_node">
-                                                <input type="hidden" name="session_id" value="{{$.SelectedSession.SessionID}}">
-                                                <input type="hidden" name="job_id" value="{{.Node.JobID}}">
-                                                <input type="hidden" name="control" value="コマンド">
-                                                <button type="submit" class="btn btn-danger">強制停止</button>
-                                            </form>
-                                        {{else if eq .Node.Status "保留中"}}
-                                            <form action="/action" method="POST" style="display:inline;">
-                                                <input type="hidden" name="action" value="stop_node">
-                                                <input type="hidden" name="session_id" value="{{$.SelectedSession.SessionID}}">
-                                                <input type="hidden" name="job_id" value="{{.Node.JobID}}">
-                                                <input type="hidden" name="control" value="保留解除">
-                                                <button type="submit">保留解除</button>
-                                            </form>
-                                        {{end}}
-                                    </td>
-                                </tr>
-                            {{end}}
-                        </tbody>
-                    </table>
-
-                    {{if .ShowLogNode}}
-                        <h3>ログ出力: {{.ShowLogNode.Name}}</h3>
-                        <pre class="log-output">{{.ShowLogNode.Log}}</pre>
-                    {{end}}
-                {{else}}
-                    <p>左側のリストからセッションを選択すると、詳細な実行状態とログが表示されます。</p>
-                {{end}}
+            <!-- 2. ノードマップセクション -->
+            <div class="split-section" style="min-height: 200px; padding:10px; height: 250px; overflow-y: auto; box-sizing: border-box;">
+                 <div class="view-title" style="margin: -10px -10px 10px -10px;">
+                     <span>🗺️ ノードマップ (トポロジー)</span>
+                     <a href="/?tab=nodes" class="refresh-icon">🔄 更新</a>
+                 </div>
+                 <div class="topology-map" style="margin-top:10px; font-size:12px;">
+        Himenos-Manager (Local)
+               │
+               ├───────────────┐
+               ▼               ▼
+         [監視ノード一覧]
+    {{range .Nodes}}
+         ├── ● <span class="topo-node {{if eq .Description "正常"}}topo-ok{{else if eq .Description "異常"}}topo-err{{else}}topo-unknown{{end}}"><a href="/?tab={{$.CurrentTab}}&s={{.ID}}" style="color:inherit;">{{.Name}} ({{.IPAddress}}) [{{.Description}}]</a></span>
+    {{else}}
+         └── 登録ノードがありません。
+    {{end}}
+                 </div>
             </div>
-        </div>
 
-    {{else if eq .CurrentTab "nodes"}}
-        <!-- ノード一覧ペイン -->
-        <div class="pane-left">
-            <div class="view-title">
-                <span>ノード一覧</span>
-                <a href="/?tab=nodes{{if .SelectedNodeID}}&s={{.SelectedNodeID}}{{end}}" class="refresh-icon">🔄 更新</a>
-            </div>
-            <div class="view-content">
-                <div style="margin-bottom: 10px;">
-                    <a href="/?tab=nodes" class="btn btn-primary" style="display:block; text-align:center;">📝 ノード一括登録・編集</a>
-                </div>
-                <table border="1" cellspacing="0" cellpadding="4" style="width:100%;">
-                    <thead>
-                        <tr><th>ファシリティ名</th><th>IPアドレス</th></tr>
-                    </thead>
-                    <tbody>
-                        {{range .Nodes}}
-                            <tr {{if eq .ID $.SelectedNodeID}}style="background:#d0e7dd;"{{end}}>
-                                <td><a href="/?tab=nodes&s={{.ID}}">{{.Name}}</a></td>
-                                <td>{{.IPAddress}}</td>
-                            </tr>
-                        {{else}}
-                            <tr><td colspan="2">ノードが登録されていません。</td></tr>
-                        {{end}}
-                    </tbody>
-                </table>
-            </div>
-        </div>
+            <!-- 3. 監視管理セクション -->
+            <div class="split-section" style="min-height: 300px; display: flex; flex-direction: row; gap: 5px; height: 350px; overflow-y: auto;">
+                 <div style="flex: 1.5; padding: 10px; border-right: 1px solid #ccc; height: 100%; box-sizing: border-box; overflow-y: auto;">
+                     <div class="view-title" style="margin: -10px -10px 10px -10px;">
+                         <span>🔍 監視設定一覧</span>
+                         <a href="/?tab=nodes" class="refresh-icon">🔄 更新</a>
+                     </div>
+                     <div style="font-size:12px; margin-bottom:10px;">
+                         <strong>全体ステータス:</strong> 
+                         <span class="badge status-danger">異常: {{.RedCount}}</span>
+                         <span class="badge status-success">正常: {{.GreenCount}}</span>
+                         <span class="badge status-unknown">不明: {{.BlueCount}}</span>
+                         (合計: {{.TotalCount}} 件)
+                     </div>
 
-        <div class="pane-right">
-            <div class="view-title"><span>ノード詳細および監視設定</span></div>
-            <div class="view-content">
-                {{if .SelectedNodeData}}
-                    <h3>🏢 {{.SelectedNodeData.Name}}</h3>
-                    <table border="1" cellspacing="0" cellpadding="4">
-                        <tr><th style="width:30%;">プラットフォーム</th><td>{{.SelectedNodeData.Platform}}</td></tr>
-                        <tr><th>IP アドレス</th><td>{{.SelectedNodeData.IPAddress}}</td></tr>
-                        <tr><th>説明</th><td>{{.SelectedNodeData.Description}}</td></tr>
-                    </table>
+                     <table border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:12px; margin-bottom:15px;">
+                         <thead>
+                             <tr>
+                                 <th>対象ノード</th>
+                                 <th>監視項目</th>
+                                 <th>閾値</th>
+                                 <th>最終状態</th>
+                                 <th>操作</th>
+                             </tr>
+                         </thead>
+                         <tbody>
+                             {{range .NodeMonitors}}
+                                 <tr>
+                                     <td>{{.NodeID}}</td>
+                                     <td>{{.Type}} ({{.Target}})</td>
+                                     <td>{{.Operator}} {{.ThresholdValue}}</td>
+                                     <td>
+                                         {{if eq .LastStatus "正常"}}<span class="badge status-success">正常</span>
+                                         {{else if eq .LastStatus "異常"}}<span class="badge status-danger">異常: {{.LastResultValue}}</span>
+                                         {{else}}<span class="badge status-unknown">未判定</span>{{end}}
+                                     </td>
+                                     <td>
+                                         <form action="/action" method="POST" style="display:inline;">
+                                             <input type="hidden" name="action" value="delete_monitor">
+                                             <input type="hidden" name="id" value="{{.ID}}">
+                                             <button type="submit" class="btn btn-danger">削除</button>
+                                         </form>
+                                     </td>
+                                 </tr>
+                             {{else}}
+                                 <tr><td colspan="5">監視設定が登録されていません。</td></tr>
+                             {{end}}
+                         </tbody>
+                     </table>
 
-                    <form action="/action" method="POST" style="margin-bottom:20px;">
-                        <input type="hidden" name="action" value="delete_node">
-                        <input type="hidden" name="id" value="{{.SelectedNodeData.ID}}">
-                        <button type="submit" class="btn btn-danger" onclick="return confirm('本当に削除しますか？このノードの監視設定もすべて削除されます。');">🗑️ ノードの削除</button>
-                    </form>
+                     <h4 style="margin-top:20px;">📜 監視アラート履歴</h4>
+                     <table border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:11px;">
+                         <thead>
+                             <tr>
+                                 <th>日時</th>
+                                 <th>対象ノード</th>
+                                 <th>項目</th>
+                                 <th>判定結果</th>
+                                 <th>値</th>
+                             </tr>
+                         </thead>
+                         <tbody>
+                             {{range .MonitorHistory}}
+                                 <tr>
+                                     <td>{{.Timestamp}}</td>
+                                     <td>{{.NodeID}}</td>
+                                     <td>{{.MonitorType}}</td>
+                                     <td>
+                                         {{if eq .Status "正常"}}<span class="badge status-success">正常</span>
+                                         {{else}}<span class="badge status-danger">異常</span>{{end}}
+                                     </td>
+                                     <td>{{.Value}} (閾値: {{.Detail}})</td>
+                                 </tr>
+                             {{else}}
+                                 <tr><td colspan="5">監視履歴はありません。</td></tr>
+                             {{end}}
+                         </tbody>
+                     </table>
+                 </div>
 
-                    <hr>
-                    <h3>🔍 このノードの監視設定</h3>
-                    <table border="1" cellspacing="0" cellpadding="4">
-                        <thead>
-                            <tr>
-                                <th>監視項目名</th>
-                                <th>監視種別</th>
-                                <th>ターゲット</th>
-                                <th>状態</th>
-                                <th>操作</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {{range .NodeMonitors}}
-                                <tr>
-                                    <td>{{.Name}}</td>
-                                    <td>{{.Type}}</td>
-                                    <td><code>{{.Target}}</code></td>
-                                    <td>
-                                        <span class="badge {{if not .Enabled}}status-hold{{else if eq .LastStatus "正常"}}status-success{{else if eq .LastStatus "異常"}}status-error{{else}}status-hold{{end}}">
-                                            {{if not .Enabled}}無効{{else}}{{.LastStatus}}{{end}}
-                                        </span>
-                                    </td>
-                                    <td>
-                                        <form action="/action" method="POST" style="display:inline;">
-                                            <input type="hidden" name="action" value="toggle_monitor">
-                                            <input type="hidden" name="id" value="{{.ID}}">
-                                            <input type="hidden" name="node_id" value="{{$.SelectedNodeData.ID}}">
-                                            <button type="submit" class="btn">{{if .Enabled}}無効化{{else}}有効化{{end}}</button>
-                                        </form>
-                                        <form action="/action" method="POST" style="display:inline;">
-                                            <input type="hidden" name="action" value="delete_monitor">
-                                            <input type="hidden" name="id" value="{{.ID}}">
-                                            <input type="hidden" name="node_id" value="{{$.SelectedNodeData.ID}}">
-                                            <button type="submit" class="btn btn-danger">削除</button>
-                                        </form>
-                                    </td>
-                                </tr>
-                            {{else}}
-                                <tr><td colspan="5">監視設定がありません。</td></tr>
-                            {{end}}
-                        </tbody>
-                    </table>
+                 <div style="flex: 1; padding: 10px; height: 100%; box-sizing: border-box; overflow-y: auto; font-size:12px;">
+                     <div class="view-title" style="margin: -10px -10px 10px -10px;"><span>➕ 監視設定追加</span></div>
+                     <form action="/action" method="POST">
+                         <input type="hidden" name="action" value="create_monitor">
+                         
+                         <label style="margin-top:3px;">対象ノード:</label>
+                         <select name="node_id" style="width:100%; font-size:12px; padding:2px;">
+                             {{range .Nodes}}
+                                 <option value="{{.ID}}">{{.Name}} ({{.IPAddress}})</option>
+                             {{end}}
+                         </select>
 
-                    <h3>＋ 新規監視設定の追加</h3>
-                    <form action="/action" method="POST">
-                        <input type="hidden" name="action" value="create_monitor">
-                        <input type="hidden" name="node_id" value="{{.SelectedNodeData.ID}}">
+                         <label style="margin-top:5px;">監視項目タイプ:</label>
+                         <select name="type" style="width:100%; font-size:12px; padding:2px;">
+                             <option value="ping">PING 応答監視 (死活監視)</option>
+                             <option value="cpu">CPU 使用率監視 (%)</option>
+                             <option value="memory">メモリ 使用率監視 (%)</option>
+                             <option value="disk">ディスク 空き容量監視 (%)</option>
+                             <option value="port">TCP ポート接続確認</option>
+                         </select>
 
-                        <label>監視項目名:</label>
-                        <input type="text" name="name" required placeholder="例: Webサイト応答監視">
+                         <label style="margin-top:5px;">ターゲット (ポート番号やディスクパスなど):</label>
+                         <input type="text" name="target" placeholder="例: 80 や C: または /" style="width:100%; font-size:12px; padding:2px;">
 
-                        <label>監視種別:</label>
-                        <select name="type">
-                            <option value="ping">ping監視 (ping疎通確認)</option>
-                            <option value="http">http監視 (HTTP応答ステータスコード確認)</option>
-                            <option value="port">ポート接続監視 (TCPポート疎通確認)</option>
-                        </select>
+                         <label style="margin-top:5px;">比較演算子:</label>
+                         <select name="operator" style="width:100%; font-size:12px; padding:2px;">
+                             <option value=">">閾値より大きい ( > )</option>
+                             <option value="<">閾値より小さい ( < )</option>
+                             <option value="==">等しい ( == )</option>
+                             <option value="!=">等しくない ( != )</option>
+                         </select>
 
-                        <label>ターゲット / 宛先:</label>
-                        <div class="help-text">http監視はURL (例: <code>http://example.com/</code>)、ポート監視はポート番号 (例: <code>80</code>) を入力してください。ping監視の場合は自動的にノード의 IPアドレスが対象になります。</div>
-                        <input type="text" name="target" placeholder="例: http://172.16.58.213/ または 80">
+                         <label style="margin-top:5px;">閾値数値 (PING監視の場合はタイムアウトms値):</label>
+                         <input type="text" name="threshold_value" required value="80" style="width:100%; font-size:12px; padding:2px;">
 
-                        <button type="submit" style="margin-top:10px;">💾 監視追加</button>
-                    </form>
-                {{else}}
-                    <!-- ノード未選択時は、直接一括登録・編集用 textarea を表示 -->
-                    <h3>📝 ノード一括登録・編集</h3>
-                    <form action="/action" method="POST">
-                        <input type="hidden" name="action" value="save_nodes_bulk">
-
-                        <label>ノードリスト (CSV形式: <code>名前,IPアドレス,プラットフォーム,説明</code>):</label>
-                        <div class="help-text">
-                            1行に1ノードずつ記述してください。プラットフォームは LINUX, WINDOWS, OTHER のいずれかを指定してください。<br>
-                            既存の行を編集すると更新され、行を削除するとそのノードが一括削除されます。新規に追加したノードは、自動的にPing監視がデフォルトONで追加されます。
-                        </div>
-                        <textarea name="nodes_csv" rows="20" style="width:100%; font-family:monospace;" placeholder="例:&#10;管理者ノード_01,172.16.60.209,LINUX,テスト用&#10;DBサーバ,172.16.60.210,WINDOWS,本番用">{{.ScriptContent}}</textarea>
-
-                        <div style="margin-top:15px;">
-                            <button type="submit" class="btn btn-primary">💾 一括保存 (適用)</button>
-                        </div>
-                    </form>
-                {{end}}
-            </div>
-        </div>
-
-    {{else if eq .CurrentTab "node_new"}}
-        <div class="pane-full">
-            <div class="view-title"><span>ノード一括登録</span></div>
-            <div class="view-content">
-                <form action="/action" method="POST">
-                    <input type="hidden" name="action" value="save_nodes_bulk">
-
-                    <label>ノードリスト (CSV形式: <code>名前,IPアドレス,プラットフォーム,説明</code>):</label>
-                    <div class="help-text">
-                        1行に1ノードずつ記述してください。プラットフォームは LINUX, WINDOWS, OTHER のいずれかを指定してください。<br>
-                        既存の行を編集すると更新され、行を削除するとそのノードが一括削除されます。新規に追加したノードは、自動的にPing監視がデフォルトONで追加されます。
-                    </div>
-                    <textarea name="nodes_csv" rows="20" style="width:100%; font-family:monospace;" placeholder="例:&#10;管理者ノード_01,172.16.60.209,LINUX,テスト用&#10;DBサーバ,172.16.60.210,WINDOWS,本番用">{{.ScriptContent}}</textarea>
-
-                    <div style="margin-top:15px;">
-                        <button type="submit" class="btn btn-primary">💾 一括保存 (適用)</button>
-                        <a href="/?tab=nodes" class="btn">キャンセル</a>
-                    </div>
-                </form>
-            </div>
-        </div>
-
-    {{else if eq .CurrentTab "topology"}}
-        <!-- 🗺️ ノード監視マップ (ネットワークトポロジー) -->
-        <div class="pane-full">
-            <div class="view-title">
-                <span>ノード監視トポロジーマップ</span>
-                <a href="/?tab=topology" class="refresh-icon">🔄 更新</a>
-            </div>
-            <div class="view-content">
-                <p>現在のシステムのネットワークマップです。ノードをクリックするとノード詳細に移動します。</p>
-                <div class="topology-map">
-                    <span class="topo-node topo-unknown">🏢 Himenosマネージャ</span>
-                                │
-                                ├─── [Ping] ─┐
-                                │            ▼
-                    {{range .Nodes}}
-                                ├─── [接続] ───► <div class="topo-node {{if eq .Description "正常"}}topo-ok{{else if eq .Description "異常"}}topo-err{{else}}topo-warn{{end}}"><a href="/?tab=nodes&s={{.ID}}">🏢 {{.Name}} ({{.IPAddress}})</a></div>
-                    {{else}}
-                                └─── (登録ノードがありません)
-                    {{end}}
-                </div>
-            </div>
-        </div>
-
-    {{else if eq .CurrentTab "monitors"}}
-        <!-- 🔍 監視管理 (3分割 Eclipse風画面レイアウト) -->
-        <div class="pane-full" style="padding: 0;">
-            <div class="split-layout">
-                
-                <!-- 上段: 監視[ノードサマリー] -->
-                <div class="split-section" style="flex: 1;">
-                    <div class="view-title">
-                        <span>監視[ノードサマリー]</span>
-                        <a href="/?tab=monitors" class="refresh-icon">🔄 更新</a>
-                    </div>
-                    <div class="view-content" style="padding:0; overflow-y:auto;">
-                        <table border="1" cellspacing="0" cellpadding="4" style="margin:0; width:100%; border:none;">
-                            <thead>
-                                <tr><th>重要度</th><th>ファシリティ名</th><th>IPアドレス</th><th>プラットフォーム</th></tr>
-                            </thead>
-                            <tbody>
-                                {{range .Nodes}}
-                                    <tr>
-                                        <td>
-                                            <span class="badge {{if eq .Description "正常"}}status-success{{else if eq .Description "異常"}}status-error{{else}}status-hold{{end}}">
-                                                {{if eq .Description ""}}未実施{{else}}{{.Description}}{{end}}
-                                            </span>
-                                        </td>
-                                        <td><a href="/?tab=nodes&s={{.ID}}">{{.Name}}</a></td>
-                                        <td>{{.IPAddress}}</td>
-                                        <td>{{.Platform}}</td>
-                                    </tr>
-                                {{else}}
-                                    <tr><td colspan="4">ノードがありません。</td></tr>
-                                {{end}}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <!-- 中段: 監視[ステータス] (最新の各監視結果) -->
-                <div class="split-section" style="flex: 1.2;">
-                    <div class="view-title">
-                        <span>監視[ステータス]</span>
-                    </div>
-                    <div class="view-content" style="padding:0; overflow-y:auto;">
-                        <table border="1" cellspacing="0" cellpadding="4" style="margin:0; width:100%; border:none;">
-                            <thead>
-                                <tr><th>重要度</th><th>監視項目名</th><th>監視種別</th><th>ターゲット</th><th>最終チェック日時</th></tr>
-                            </thead>
-                            <tbody>
-                                {{range .NodeMonitors}}
-                                    <tr>
-                                        <td>
-                                            <span class="badge {{if eq .LastStatus "正常"}}status-success{{else if eq .LastStatus "異常"}}status-error{{else}}status-hold{{end}}">
-                                                {{.LastStatus}}
-                                            </span>
-                                        </td>
-                                        <td>{{.Name}}</td>
-                                        <td>{{.Type}}</td>
-                                        <td><code>{{.Target}}</code></td>
-                                        <td>{{.LastCheck}}</td>
-                                    </tr>
-                                {{else}}
-                                    <tr><td colspan="5">アクティブな監視設定はありません。ノード一覧からノードに監視を追加してください。</td></tr>
-                                {{end}}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <!-- 下段: 監視[イベント履歴] (時系列タイムラインログ) -->
-                <div class="split-section" style="flex: 1.5;">
-                    <div class="view-title">
-                        <span>監視[イベント履歴]</span>
-                    </div>
-                    <div class="view-content" style="padding:0; overflow-y:auto;">
-                        <table border="1" cellspacing="0" cellpadding="4" style="margin:0; width:100%; border:none;">
-                            <thead>
-                                <tr><th>重要度</th><th>チェック日時</th><th>ノード名</th><th>監視項目名</th><th>種別</th><th>詳細ログ</th></tr>
-                            </thead>
-                            <tbody>
-                                {{range .MonitorHistory}}
-                                    <tr>
-                                        <td>
-                                            <span class="badge {{if eq .Status "正常"}}status-success{{else}}status-error{{end}}">
-                                                {{.Status}}
-                                            </span>
-                                        </td>
-                                        <td>{{.CheckTime}}</td>
-                                        <td>{{.NodeName}}</td>
-                                        <td>{{.Name}}</td>
-                                        <td>{{.Type}}</td>
-                                        <td><code>{{.Log}}</code></td>
-                                    </tr>
-                                {{else}}
-                                    <tr><td colspan="6">過去の監視履歴イベントはありません。</td></tr>
-                                {{end}}
-                            </tbody>
-                        </table>
-                    </div>
-                    
-                    <!-- 下部ステータス集計バー (Himenos再現) -->
-                    <div class="summary-bar">
-                        <div class="summary-item summary-red">異常: {{.RedCount}}</div>
-                        <div class="summary-item summary-yellow">警告: 0</div>
-                        <div class="summary-item summary-green">正常: {{.GreenCount}}</div>
-                        <div class="summary-item summary-blue">未実施: {{.BlueCount}}</div>
-                        <div class="summary-count">表示件数: {{.TotalCount}}</div>
-                    </div>
-                </div>
-
+                         <button type="submit" style="margin-top:10px; width:100%; padding:4px;">➕ 登録</button>
+                     </form>
+                 </div>
             </div>
         </div>
 
@@ -2832,10 +2662,15 @@ func main() {
 				data.TotalCount = len(data.SessionNodes)
 			} else {
 				for _, s := range filteredSessions {
-					if s.Status == "異常終了" { red++ }
-					else if s.Status == "警告終了" { yellow++ }
-					else if s.Status == "正常終了" { green++ }
-					else { blue++ }
+					if s.Status == "異常終了" {
+						red++
+					} else if s.Status == "警告終了" {
+						yellow++
+					} else if s.Status == "正常終了" {
+						green++
+					} else {
+						blue++
+					}
 				}
 				data.TotalCount = len(filteredSessions)
 			}
@@ -2897,9 +2732,13 @@ func main() {
 			}
 			var red, green, blue int
 			for _, m := range engine.monitors {
-				if m.LastStatus == "異常" { red++ }
-				else if m.LastStatus == "正常" { green++ }
-				else { blue++ }
+				if m.LastStatus == "異常" {
+					red++
+				} else if m.LastStatus == "正常" {
+					green++
+				} else {
+					blue++
+				}
 			}
 			data.RedCount = red
 			data.GreenCount = green
