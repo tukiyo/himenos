@@ -1796,6 +1796,30 @@ const htmlTemplate = `<!DOCTYPE html>
                 "script_body_lbl": "スクリプト本文 (Git連携):",
                 "btn_save": "💾 保存",
                 "btn_cancel": "キャンセル",
+                "btn_create_job": "＋ ジョブ作成",
+                "btn_create_unit": "＋ ユニット作成",
+                "schedule_bulk_title": "📝 スケジュール一括登録・編集 (crontab -e 互換)",
+                "btn_save_bulk_sched": "💾 スケジュール一括保存 (適用)",
+                "lbl_schedule_name": "スケジュール名:",
+                "lbl_target_job": "実行対象ジョブ:",
+                "lbl_setting_type": "設定タイプ:",
+                "lbl_run_date": "日付 (日時指定用):",
+                "lbl_cron_expr": "crontab設定 (例: */15 * * * *):",
+                "lbl_weekday": "曜日 (毎週用, 0=日, 1=月, ...):",
+                "lbl_start_time": "開始時刻 (hh:mm):",
+                "lbl_interval": "間隔時間 (毎時/一定間隔用・分):",
+                "script_toggle_help": "※ スクリプトを無効化すると、このスクリプトにバインドされているジョブの実行が自動的にスキップされます。",
+                "job_new_basic_title": "基本設定",
+                "job_new_script_title": "新規スクリプト作成 (新規ジョブ時のみ)",
+                "lbl_job_name": "名前:",
+                "lbl_job_script": "実行スクリプトファイル:",
+                "lbl_job_new_script_name": "新規作成ファイル名 (新規作成時のみ):",
+                "lbl_job_new_script_body": "スクリプト内容 (新規作成時のみ):",
+                "lbl_job_args": "引数 (任意):",
+                "lbl_job_wait": "待ち条件 (先行ジョブ、複数ある場合はカンマ区切り):",
+                "lbl_job_wait_help": "指定したジョブが正常終了すると起動します。ジョブ名で指定してください。",
+                "lbl_job_notify": "個別の通知設定:",
+                "btn_save_job": "💾 作成して保存",
                 "settings_title": "環境構築 (通知設定 & バックアップ)",
                 "settings_en_de": "💾 Himenos設定のインポート / エクスポート (YAML形式)",
                 "settings_en_de_help": "すべての設定を一括バックアップ・復元できます。",
@@ -1848,6 +1872,30 @@ const htmlTemplate = `<!DOCTYPE html>
                 "script_body_lbl": "Script Content (Git Linked):",
                 "btn_save": "💾 Save",
                 "btn_cancel": "Cancel",
+                "btn_create_job": "+ Create Job",
+                "btn_create_unit": "+ Create Unit",
+                "schedule_bulk_title": "📝 Bulk Schedule Editor (crontab -e)",
+                "btn_save_bulk_sched": "Bulk Save Schedules",
+                "lbl_schedule_name": "Schedule Name:",
+                "lbl_target_job": "Target Job:",
+                "lbl_setting_type": "Setting Type:",
+                "lbl_run_date": "Run Date (Once):",
+                "lbl_cron_expr": "crontab (e.g. */15 * * * *):",
+                "lbl_weekday": "Weekday (0=Sun, 1=Mon, ...):",
+                "lbl_start_time": "Start Time (hh:mm):",
+                "lbl_interval": "Interval (Minutes):",
+                "script_toggle_help": "* Disabling the script will automatically skip the execution of any jobs bound to it.",
+                "job_new_basic_title": "Basic Settings",
+                "job_new_script_title": "New Script File (For New Job)",
+                "lbl_job_name": "Name:",
+                "lbl_job_script": "Script File:",
+                "lbl_job_new_script_name": "Script Filename (For New File Only):",
+                "lbl_job_new_script_body": "Script Content (For New File Only):",
+                "lbl_job_args": "Arguments (Optional):",
+                "lbl_job_wait": "Wait Conditions (Comma separated if multiple):",
+                "lbl_job_wait_help": "Starts automatically when the specified job finishes successfully.",
+                "lbl_job_notify": "Individual Notification Settings:",
+                "btn_save_job": "💾 Create & Save",
                 "settings_title": "Settings (Notifications & Backup)",
                 "settings_en_de": "💾 Himenos Settings Import / Export (YAML)",
                 "settings_en_de_help": "Backup and restore all settings at once.",
@@ -1977,8 +2025,8 @@ const htmlTemplate = `<!DOCTYPE html>
                      </div>
                      <div class="view-content">
                          <div style="margin-bottom: 10px; display: flex; gap: 5px;">
-                             <a href="/?tab=job_new&type=job" class="btn btn-primary" style="flex:1; text-align:center;">＋ ジョブ作成</a>
-                             <a href="/?tab=job_new&type=unit" class="btn" style="flex:1; text-align:center;">＋ ユニット作成</a>
+                             <a href="/?tab=job_new&type=job" class="btn btn-primary" style="flex:1; text-align:center;"><span data-i18n="btn_create_job">＋ ジョブ作成</span></a>
+                             <a href="/?tab=job_new&type=unit" class="btn" style="flex:1; text-align:center;"><span data-i18n="btn_create_unit">＋ ユニット作成</span></a>
                          </div>
                          {{range .JobTree}}
                              <div class="tree-node {{if eq .Node.ID $.SelectedJobID}}tree-active{{end}}">
@@ -1988,7 +2036,7 @@ const htmlTemplate = `<!DOCTYPE html>
                              <div>ジョブが登録されていません。</div>
                          {{end}}
 
-                         <h4 style="margin-top:20px; border-bottom:1px solid #ccc; padding-bottom:3px;">📁 実スクリプトファイル一覧</h4>
+                         <h4 style="margin-top:20px; border-bottom:1px solid #ccc; padding-bottom:3px;"><span data-i18n="real_script_list">📁 実スクリプトファイル一覧</span></h4>
                          <div class="tree-node">📁 scripts</div>
                          {{range .ScriptFiles}}
                              <div class="tree-node">{{.Prefix}}📝 <a href="/?tab=script_edit&file={{.Path}}" class="tree-link">{{if .IsEnabled}}{{.Name}}{{else}}<span style="text-decoration: line-through; color: #888;">{{.Name}} (無効化中)</span>{{end}}</a></div>
@@ -2148,7 +2196,7 @@ const htmlTemplate = `<!DOCTYPE html>
                                    </div>
 
                                    <!-- 右：バインドされているジョブ -->
-                                   <div style="flex: 1.5; padding: 4px 6px; background:#f9f9f9; border:1px solid #ccc; border-radius: 4px; box-sizing: border-box; min-height: 48px; font-size: 11px;">
+                                   <div style="flex: 1.5; padding: 4px 6px; background: var(--card-bg); border:1px solid var(--border-color); border-radius: 4px; box-sizing: border-box; min-height: 48px; font-size: 11px; color: var(--text-color);">
                                        <span style="font-weight: bold;">🔗 バインド先ジョブ:</span>
                                        {{if .SelectedNode}}
                                            <strong>{{.SelectedNode.Name}}</strong>
@@ -2224,7 +2272,7 @@ const htmlTemplate = `<!DOCTYPE html>
             <div class="split-section" style="flex: 1; min-height: 150px; display: flex; flex-direction: row; gap: 5px; box-sizing: border-box; overflow: hidden;">
                  <div style="flex: 3; overflow-y: auto; padding: 10px; border-right: 1px solid #ccc; height: 100%; box-sizing: border-box;">
                      <div class="view-title" style="margin: -10px -10px 10px -10px;">
-                         <span data-i18n="job_history">📊 ジョブ履歴</span>
+                         <span data-i18n="job_history"><span data-i18n="job_history">📊 ジョブ履歴</span>
                          <a href="/?tab=jobs" class="refresh-icon"><span data-i18n="btn_update">🔄 更新</span></a>
                      </div>
                      <form action="/" method="GET" style="display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px; font-size:12px;">
@@ -2297,7 +2345,7 @@ const htmlTemplate = `<!DOCTYPE html>
             <div class="split-section" style="flex: 1; min-height: 150px; display: flex; flex-direction: row; gap: 5px; box-sizing: border-box; overflow: hidden;">
                  <div style="flex: 1.5; padding: 10px; border-right: 1px solid #ccc; height: 100%; box-sizing: border-box; overflow-y: auto;">
                      <div class="view-title" style="margin: -10px -10px 10px -10px;">
-                         <span data-i18n="schedule_list">📅 スケジュール一覧</span>
+                         <span data-i18n="schedule_list"><span data-i18n="schedule_list">📅 スケジュール一覧</span>
                          <a href="/?tab=jobs" class="refresh-icon"><span data-i18n="btn_update">🔄 更新</span></a>
                      </div>
                      <table border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:12px;">
@@ -2353,12 +2401,12 @@ const htmlTemplate = `<!DOCTYPE html>
                          </tbody>
                      </table>
 
-                     <h4 style="margin-top:20px;">📝 スケジュール一括登録・編集 (crontab -e 互換)</h4>
+                     <h4 style="margin-top:20px;"><h4 data-i18n="schedule_bulk_title">📝 スケジュール一括登録・編集 (crontab -e 互換)</h4>
                      <form action="/action" method="POST">
                          <input type="hidden" name="action" value="save_schedules_bulk">
                          <textarea name="schedules_cron" rows="6" style="width:100%; font-family:monospace; font-size:12px;">{{.SchedulesCronText}}</textarea>
                          <div style="margin-top:5px;">
-                             <button type="submit" class="btn btn-primary" style="font-size:12px; padding:3px 10px;">💾 スケジュール一括保存 (適用)</button>
+                             <button type="submit" class="btn btn-primary" style="font-size:12px; padding:3px 10px;"><span data-i18n="btn_save_bulk_sched">💾 スケジュール一括保存 (適用)</span></button>
                          </div>
                      </form>
                  </div>
@@ -2368,17 +2416,17 @@ const htmlTemplate = `<!DOCTYPE html>
                      <form action="/action" method="POST">
                          <input type="hidden" name="action" value="create_schedule">
                          
-                         <label style="margin-top:3px;">スケジュール名:</label>
+                         <label style="margin-top:3px;" data-i18n="lbl_schedule_name">スケジュール名:</label>
                          <input type="text" name="name" required placeholder="例: 夜間バックアップ" style="width:100%; font-size:12px; padding:2px;">
 
-                         <label style="margin-top:5px;">実行対象ジョブ:</label>
+                         <label style="margin-top:5px;" data-i18n="lbl_target_job">実行対象ジョブ:</label>
                          <select name="job_id" style="width:100%; font-size:12px; padding:2px;">
                              {{range .UnitOptions}}
                                  <option value="{{.ID}}">{{.Name}}</option>
                              {{end}}
                          </select>
 
-                         <label style="margin-top:4px; margin-bottom:2px;">設定タイプ:</label>
+                         <label style="margin-top:4px; margin-bottom:2px;" data-i18n="lbl_setting_type">設定タイプ:</label>
                           <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-bottom: 4px;">
                               <label style="font-weight:normal; margin-top:0; font-size:11px; display: flex; align-items: center; gap: 2px;"><input type="radio" name="type" value="cron" checked onclick="updateScheduleForm()"> crontab</label>
                               <label style="font-weight:normal; margin-top:0; font-size:11px; display: flex; align-items: center; gap: 2px;"><input type="radio" name="type" value="daily" onclick="updateScheduleForm()"> 毎日</label>
@@ -2388,22 +2436,22 @@ const htmlTemplate = `<!DOCTYPE html>
                               <label style="font-weight:normal; margin-top:0; font-size:11px; display: flex; align-items: center; gap: 2px;"><input type="radio" name="type" value="datetime" onclick="updateScheduleForm()"> 日時指定</label>
                           </div>
 
-                         <label style="margin-top:3px;">日付 (日時指定用):</label>
+                         <label style="margin-top:3px;" data-i18n="lbl_run_date">日付 (日時指定用):</label>
                          <input type="date" name="run_date" id="input_run_date" style="width:100%; font-size:12px; padding:2px;">
 
-                         <label style="margin-top:3px;">crontab設定 (例: <code>*/15 * * * *</code>):</label>
+                         <label style="margin-top:3px;" data-i18n="lbl_cron_expr">crontab設定 (例: <code>*/15 * * * *</code>):</label>
                          <input type="text" name="cron_expr" id="input_cron_expr" placeholder="*/15 * * * *" style="width:100%; font-size:12px; padding:2px;">
 
-                         <label style="margin-top:3px;">曜日 (毎週用, 0=日, 1=月, ...):</label>
+                         <label style="margin-top:3px;" data-i18n="lbl_weekday">曜日 (毎週用, 0=日, 1=月, ...):</label>
                          <input type="text" name="weekday" id="input_weekday" value="*" style="width:100%; font-size:12px; padding:2px;">
 
-                         <label style="margin-top:3px;">開始時刻 (hh:mm):</label>
+                         <label style="margin-top:3px;" data-i18n="lbl_start_time">開始時刻 (hh:mm):</label>
                          <div style="display: flex; gap: 5px; align-items: center;">
                              <input type="text" name="hour" id="input_hour" placeholder="hh" value="18" style="width: 40px; font-size:12px; padding:2px;"> : 
                              <input type="text" name="minute" id="input_minute" placeholder="mm" value="00" style="width: 40px; font-size:12px; padding:2px;">
                          </div>
 
-                         <label style="margin-top:3px;">間隔時間 (毎時/一定間隔用・分):</label>
+                         <label style="margin-top:3px;" data-i18n="lbl_interval">間隔時間 (毎時/一定間隔用・分):</label>
                          <input type="text" name="interval" id="input_interval" placeholder="15" style="width:100%; font-size:12px; padding:2px;">
 
                          <button type="submit" style="margin-top:8px; width:100%; padding:4px;"><span data-i18n="btn_register">➕ 登録</span></button>
