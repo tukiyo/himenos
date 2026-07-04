@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"gopkg.in/yaml.v3"
 	"html/template"
 	"io"
 	"net"
@@ -21,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"gopkg.in/yaml.v3"
+	_ "modernc.org/sqlite"
 )
 
 // 設定ファイルパス
@@ -43,24 +45,120 @@ var (
 	monitoringLogFile = filepath.Join(logsDir, "monitoring.log")
 )
 
+// --- SQLite Database 連携 ---
+var db *sql.DB
+
+func initDB() {
+	var err error
+	dbPath := filepath.Join(logsDir, "history.db")
+	db, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		fmt.Printf("Failed to open SQLite database: %v\n", err)
+		return
+	}
+
+	createTableQuery := `
+	CREATE TABLE IF NOT EXISTS session_history (
+		session_id TEXT PRIMARY KEY,
+		status TEXT,
+		start_date TEXT,
+		end_date TEXT,
+		unit_name TEXT,
+		runtime_args TEXT,
+		data TEXT
+	);`
+	_, err = db.Exec(createTableQuery)
+	if err != nil {
+		fmt.Printf("Failed to create table: %v\n", err)
+	}
+}
+
+func migrateOldLogToDB() {
+	logPath := filepath.Join(logsDir, "history.log")
+	if _, err := os.Stat(logPath); os.IsNotExist(err) {
+		return // 移行ファイルなし
+	}
+
+	fmt.Println("[Migration] Migrating history.log to SQLite history.db...")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return
+	}
+
+	lines := strings.Split(string(data), "\n")
+	tx, err := db.Begin()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare("INSERT OR REPLACE INTO session_history (session_id, status, start_date, end_date, unit_name, runtime_args, data) VALUES (?, ?, ?, ?, ?, ?, ?)")
+	if err != nil {
+		return
+	}
+	defer stmt.Close()
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, " | ", 2)
+		if len(parts) < 2 {
+			continue
+		}
+
+		var session JobSession
+		if err := json.Unmarshal([]byte(parts[1]), &session); err == nil {
+			jsonData, _ := json.Marshal(session)
+			_, _ = stmt.Exec(session.SessionID, session.Status, session.StartDate, session.EndDate, session.UnitName, session.RuntimeArgs, string(jsonData))
+		}
+	}
+
+	_ = tx.Commit()
+	_ = os.Rename(logPath, filepath.Join(logsDir, "history.log_old"))
+	fmt.Println("[Migration] Migration completed successfully!")
+}
+
+func (e *Engine) loadHistoryFromDB() {
+	if db == nil {
+		return
+	}
+	e.sessions = nil
+
+	rows, err := db.Query("SELECT data FROM session_history ORDER BY start_date DESC LIMIT 50")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var dataStr string
+		if err := rows.Scan(&dataStr); err == nil {
+			var session JobSession
+			if err := json.Unmarshal([]byte(dataStr), &session); err == nil {
+				e.sessions = append(e.sessions, &session)
+			}
+		}
+	}
+}
+
 func migrateOldFiles() {
 	cwd, _ := os.Getwd()
 	fmt.Printf("[Migration Debug] Current Working Directory: %s\n", cwd)
-	
+
 	err1 := os.MkdirAll(configDir, 0755)
 	err2 := os.MkdirAll(logsDir, 0755)
 	fmt.Printf("[Migration Debug] MkdirAll config: %v, logs: %v\n", err1, err2)
-
 	migrations := map[string]string{
-		"jobs.yaml":              jobsFile,
-		"schedules.yaml":         schedulesFile,
-		"settings.yaml":          settingsFile,
-		"nodes.yaml":             nodesFile,
-		"monitors.yaml":          monitorsFile,
-		"history.yaml":           filepath.Join(logsDir, "history.yaml_old"),
+		"jobs.yaml":               jobsFile,
+		"schedules.yaml":          schedulesFile,
+		"settings.yaml":           settingsFile,
+		"nodes.yaml":              nodesFile,
+		"monitors.yaml":           monitorsFile,
+		"history.yaml":            filepath.Join(logsDir, "history.yaml_old"),
 		"monitoring_history.yaml": filepath.Join(logsDir, "monitoring_history.yaml_old"),
 	}
-
 	for oldFile, newFile := range migrations {
 		if _, err := os.Stat(oldFile); err == nil {
 			fmt.Printf("[Migration Debug] Found old file: %s, migrating to: %s\n", oldFile, newFile)
@@ -73,7 +171,6 @@ func migrateOldFiles() {
 		}
 	}
 }
-
 func rotateLogIfNeeded(filePath string) {
 	info, err := os.Stat(filePath)
 	if err != nil {
@@ -88,12 +185,10 @@ func rotateLogIfNeeded(filePath string) {
 }
 
 // --- データモデルの定義 ---
-
 type BasicAuthUser struct {
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
 }
-
 type Settings struct {
 	SMTPHost             string          `yaml:"smtp_host"`
 	SMTPPort             string          `yaml:"smtp_port"`
@@ -107,7 +202,6 @@ type Settings struct {
 	AllowedIPs           []string        `yaml:"allowed_ips"`
 	IPRestrictionEnabled bool            `yaml:"ip_restriction_enabled"`
 }
-
 type JobType string
 
 const (
@@ -117,56 +211,55 @@ const (
 )
 
 type JobNode struct {
-	ID             string          `yaml:"id"`
-	Name           string          `yaml:"name"`
-	Type           JobType         `yaml:"type"`
-	Description    string          `yaml:"description"`
-	ParentID       string          `yaml:"parent_id"` // 親ノードID
+	ID               string          `yaml:"id"`
+	Name             string          `yaml:"name"`
+	Type             JobType         `yaml:"type"`
+	Description      string          `yaml:"description"`
+	ParentID         string          `yaml:"parent_id"`          // 親ノードID
 	OriginalParentID string          `yaml:"original_parent_id"` // ゴミ箱から元に戻す用
-	Children       []string        `yaml:"children"`  // 子ノードIDリスト
-	Command        string          `yaml:"command"`
-	StopCommand    string          `json:"stop_command"`
-	RunUser        string          `yaml:"run_user"`
-	WaitConditions []WaitCondition `yaml:"wait_conditions"`
-	WaitRelation   string          `yaml:"wait_relation"`   // "AND" or "OR"
-	EndOnWaitFail  bool            `json:"end_on_wait_fail"` // 条件不一致時に終了するか
-	WaitFailValue  int             `json:"wait_fail_value"`
-	CalendarID     string          `json:"calendar_id"`
-	CalendarVal    int             `json:"calendar_val"`
-	IsHold         bool            `json:"is_hold"`
-	IsSkip         bool            `json:"is_skip"`
-	SkipValue      int             `json:"skip_value"`
-	NormalRange    string          `yaml:"normal_range"` // 例: "0" または "0-0"
-	WarnRange      string          `yaml:"warn_range"`   // 例: "1-5"
-	NotifyStart    string          `yaml:"notify_start"` // "slack", "email", "both", ""
-	NotifyNormal   string          `yaml:"notify_normal"`
-	NotifyWarning  string          `yaml:"notify_warning"`
-	NotifyError    string          `yaml:"notify_error"`
+	Children         []string        `yaml:"children"`           // 子ノードIDリスト
+	Command          string          `yaml:"command"`
+	Args             string          `yaml:"args"`
+	StopCommand      string          `json:"stop_command"`
+	RunUser          string          `yaml:"run_user"`
+	WaitConditions   []WaitCondition `yaml:"wait_conditions"`
+	WaitRelation     string          `yaml:"wait_relation"`    // "AND" or "OR"
+	EndOnWaitFail    bool            `json:"end_on_wait_fail"` // 条件不一致時に終了するか
+	WaitFailValue    int             `json:"wait_fail_value"`
+	CalendarID       string          `json:"calendar_id"`
+	CalendarVal      int             `json:"calendar_val"`
+	IsHold           bool            `json:"is_hold"`
+	IsSkip           bool            `json:"is_skip"`
+	SkipValue        int             `json:"skip_value"`
+	NormalRange      string          `yaml:"normal_range"` // 例: "0" または "0-0"
+	WarnRange        string          `yaml:"warn_range"`   // 例: "1-5"
+	NotifyStart      string          `yaml:"notify_start"` // "slack", "email", "both", ""
+	NotifyNormal     string          `yaml:"notify_normal"`
+	NotifyWarning    string          `yaml:"notify_warning"`
+	NotifyError      string          `yaml:"notify_error"`
 }
-
 type WaitCondition struct {
 	Type  string `yaml:"type"`   // "status" or "value"
 	JobID string `yaml:"job_id"` // 先行ジョブID
 	Value string `yaml:"value"`  // "正常" / "警告" / "異常" または終了値
 }
-
 type Schedule struct {
 	ID       string `yaml:"id"`
 	Name     string `yaml:"name"`
-	JobID    string `yaml:"job_id"` // 対象ジョブユニットID
-	Type     string `yaml:"type"`   // "datetime" or "weekly" or "daily" or "hourly" or "interval" or "cron"
-	Month    string `yaml:"month"`   // "1"-"12" or "*"
-	Day      string `yaml:"day"`     // "1"-"31" or "*"
-	Weekday  string `yaml:"weekday"` // "0"-"6" or "*" (0=日曜日)
-	Hour     string `yaml:"hour"`    // "0"-"23"
-	Minute   string `yaml:"minute"`  // "0"-"59"
-	Interval int    `yaml:"interval"` // 実行間隔 (分)
+	JobID    string `yaml:"job_id"`    // 対象ジョブユニットID
+	Type     string `yaml:"type"`      // "datetime" or "weekly" or "daily" or "hourly" or "interval" or "cron"
+	Month    string `yaml:"month"`     // "1"-"12" or "*"
+	Day      string `yaml:"day"`       // "1"-"31" or "*"
+	Weekday  string `yaml:"weekday"`   // "0"-"6" or "*" (0=日曜日)
+	Hour     string `yaml:"hour"`      // "0"-"23"
+	Minute   string `yaml:"minute"`    // "0"-"59"
+	Interval int    `yaml:"interval"`  // 実行間隔 (分)
 	CronExpr string `yaml:"cron_expr"` // crontab形式式
+	Args     string `yaml:"args"`
 	Enabled  bool   `yaml:"enabled"`
 }
-
 type JobSession struct {
-	SessionID   string                `yaml:"session_id"`   // 時刻ベース (20060102150405-000)
+	SessionID   string                `yaml:"session_id"` // 時刻ベース (20060102150405-000)
 	UnitID      string                `yaml:"unit_id"`
 	UnitName    string                `yaml:"unit_name"`
 	TriggerType string                `yaml:"trigger_type"` // "スケジュール", "手動実行"
@@ -175,21 +268,21 @@ type JobSession struct {
 	EndDate     string                `yaml:"end_date"`
 	Status      string                `yaml:"status"` // "実行中", "正常終了", "警告終了", "異常終了", "中断"
 	ExitValue   int                   `yaml:"exit_value"`
+	RuntimeArgs string                `yaml:"runtime_args"`
 	Nodes       map[string]*NodeState `yaml:"nodes"`
 }
-
 type NodeState struct {
-	JobID     string `yaml:"job_id"`
-	Name      string `yaml:"name"`
-	Type      string `yaml:"type"`
-	Status    string `yaml:"status"` // "待機中", "保留中", "スキップ", "実行中", "停止処理中", "中断", "コマンド停止", "終了", "起動失敗"
-	ExitValue int    `yaml:"exit_value"`
-	StartDate string `yaml:"start_date"`
-	EndDate   string `yaml:"end_date"`
-	Log       string `yaml:"log"`
-	PID       int    `json:"pid"`
+	JobID       string `yaml:"job_id"`
+	Name        string `yaml:"name"`
+	Type        string `yaml:"type"`
+	Status      string `yaml:"status"` // "待機中", "保留中", "スキップ", "実行中", "停止処理中", "中断", "コマンド停止", "終了", "起動失敗"
+	ExitValue   int    `yaml:"exit_value"`
+	StartDate   string `yaml:"start_date"`
+	EndDate     string `yaml:"end_date"`
+	Log         string `yaml:"log"`
+	PID         int    `json:"pid"`
+	RuntimeArgs string `yaml:"runtime_args"`
 }
-
 type ManagedNode struct {
 	ID          string `yaml:"id"`
 	Name        string `yaml:"name"`
@@ -197,7 +290,6 @@ type ManagedNode struct {
 	IPAddress   string `yaml:"ip_address"`
 	Description string `yaml:"description"`
 }
-
 type MonitorSetting struct {
 	ID              string `yaml:"id"`
 	Name            string `yaml:"name"`
@@ -210,8 +302,11 @@ type MonitorSetting struct {
 	LastCheck       string `yaml:"last_check"`
 	LastResultValue string `yaml:"last_result_value"`
 	Enabled         bool   `yaml:"enabled"`
+	OnErrorScript   string `yaml:"on_error_script"`
+	OnErrorArgs     string `yaml:"on_error_args"`
+	OnNormalScript  string `yaml:"on_normal_script"`
+	OnNormalArgs    string `yaml:"on_normal_args"`
 }
-
 type MonitorHistory struct {
 	CheckTime string `yaml:"check_time"`
 	MonitorID string `yaml:"monitor_id"`
@@ -221,7 +316,6 @@ type MonitorHistory struct {
 	Status    string `yaml:"status"` // "正常", "異常"
 	Log       string `yaml:"log"`
 }
-
 type BackupData struct {
 	Jobs      []*JobNode        `yaml:"jobs"`
 	Schedules []Schedule        `yaml:"schedules"`
@@ -265,7 +359,6 @@ func matchCronField(field string, value int) bool {
 	}
 	return num == value
 }
-
 func matchCronSchedule(expr string, t time.Time) bool {
 	fields := strings.Fields(expr)
 	if len(fields) != 5 {
@@ -283,15 +376,12 @@ func matchCronSchedule(expr string, t time.Time) bool {
 		matchCronField(fields[4], dow)
 }
 
-
-
 // --- グローバル変数 & エンジン定義 ---
-
 type Engine struct {
 	mu           sync.Mutex
 	sessions     []*JobSession
-	activeCmds   map[string]*exec.Cmd      // key: "session_id:job_id"
-	stateChanged map[string]chan bool      // key: session_id
+	activeCmds   map[string]*exec.Cmd // key: "session_id:job_id"
+	stateChanged map[string]chan bool // key: session_id
 	settings     Settings
 	jobs         map[string]*JobNode
 	schedules    []Schedule
@@ -303,6 +393,8 @@ type Engine struct {
 var engine *Engine
 
 func initEngine() {
+	initDB()
+	migrateOldLogToDB()
 	migrateOldFiles()
 	engine = &Engine{
 		activeCmds:   make(map[string]*exec.Cmd),
@@ -313,13 +405,10 @@ func initEngine() {
 }
 
 // --- ファイル永続化とGitコミット ---
-
 func (e *Engine) loadAll() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
 	_ = os.MkdirAll(scriptsDir, 0755)
-
 	// Settings
 	if data, err := os.ReadFile(settingsFile); err == nil {
 		_ = yaml.Unmarshal(data, &e.settings)
@@ -353,7 +442,7 @@ func (e *Engine) loadAll() {
 		lines := strings.Split(string(data), "\n")
 		sessionMap := make(map[string]*JobSession)
 		var sessionOrder []string
-		
+
 		for _, line := range lines {
 			line = strings.TrimSpace(line)
 			if line == "" {
@@ -363,7 +452,7 @@ func (e *Engine) loadAll() {
 			if len(parts) < 2 {
 				continue
 			}
-			
+
 			var session JobSession
 			if err := json.Unmarshal([]byte(parts[1]), &session); err == nil {
 				if _, exists := sessionMap[session.SessionID]; !exists {
@@ -372,7 +461,7 @@ func (e *Engine) loadAll() {
 				sessionMap[session.SessionID] = &session
 			}
 		}
-		
+
 		e.sessions = nil
 		for _, id := range sessionOrder {
 			e.sessions = append(e.sessions, sessionMap[id])
@@ -410,12 +499,12 @@ func (e *Engine) loadAll() {
 			if len(parts) < 7 {
 				continue
 			}
-			
+
 			timePart := parts[0]
 			if len(timePart) > 21 {
 				timePart = timePart[1:20]
 			}
-			
+
 			h := MonitorHistory{
 				CheckTime: timePart,
 				MonitorID: strings.TrimPrefix(parts[1], "ID:"),
@@ -430,7 +519,6 @@ func (e *Engine) loadAll() {
 		}
 	}
 }
-
 func (e *Engine) saveJobs() {
 	var list []*JobNode
 	for _, j := range e.jobs {
@@ -440,19 +528,16 @@ func (e *Engine) saveJobs() {
 	_ = os.WriteFile(jobsFile, data, 0644)
 	gitCommit("System: Update jobs", jobsFile)
 }
-
 func (e *Engine) saveSchedules() {
 	data, _ := yaml.Marshal(e.schedules)
 	_ = os.WriteFile(schedulesFile, data, 0644)
 	gitCommit("System: Update schedules", schedulesFile)
 }
-
 func (e *Engine) saveSettings() {
 	data, _ := json.MarshalIndent(e.settings, "", "  ")
 	_ = os.WriteFile(settingsFile, data, 0644)
 	gitCommit("System: Update settings", settingsFile)
 }
-
 func (e *Engine) saveNodes() {
 	var list []*ManagedNode
 	for _, n := range e.nodes {
@@ -462,7 +547,6 @@ func (e *Engine) saveNodes() {
 	_ = os.WriteFile(nodesFile, data, 0644)
 	gitCommit("System: Update nodes", nodesFile)
 }
-
 func (e *Engine) saveMonitors() {
 	var list []*MonitorSetting
 	for _, m := range e.monitors {
@@ -472,48 +556,43 @@ func (e *Engine) saveMonitors() {
 	_ = os.WriteFile(monitorsFile, data, 0644)
 	gitCommit("System: Update monitors", monitorsFile)
 }
-
 func (e *Engine) saveMonHistory() {
 	// 互換性維持のためのダミーメソッド。監視履歴追加時は appendMonHistoryLog を呼び出します。
 }
-
 func (e *Engine) appendMonHistoryLog(h MonitorHistory) {
 	rotateLogIfNeeded(monitoringLogFile)
 	escapedLog := strings.ReplaceAll(h.Log, "\n", "\\n")
 	escapedLog = strings.ReplaceAll(escapedLog, "\r", "")
 	escapedLog = strings.ReplaceAll(escapedLog, "|", "\\|")
-	
+
 	line := fmt.Sprintf("[%s] MONITOR | ID:%s | Name:%s | Type:%s | Node:%s | Status:%s | Log:%s\n",
 		h.CheckTime, h.MonitorID, h.Name, h.Type, h.NodeName, h.Status, escapedLog)
-		
+
 	f, err := os.OpenFile(monitoringLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err == nil {
 		_, _ = f.WriteString(line)
 		_ = f.Close()
 	}
 }
-
 func (e *Engine) saveHistory(session *JobSession) {
-	if session == nil {
+	if session == nil || db == nil {
 		return
 	}
-	rotateLogIfNeeded(historyLogFile)
-	
+
 	jsonData, err := json.Marshal(session)
 	if err != nil {
 		return
 	}
-	
-	nowStr := time.Now().Format("2006-01-02 15:04:05")
-	line := fmt.Sprintf("[%s] SESSION_ID: %s | %s\n", nowStr, session.SessionID, string(jsonData))
-	
-	f, err := os.OpenFile(historyLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err == nil {
-		_, _ = f.WriteString(line)
-		_ = f.Close()
-	}
-}
 
+	query := "INSERT OR REPLACE INTO session_history (session_id, status, start_date, end_date, unit_name, runtime_args, data) VALUES (?, ?, ?, ?, ?, ?, ?)"
+	_, err = db.Exec(query, session.SessionID, session.Status, session.StartDate, session.EndDate, session.UnitName, session.RuntimeArgs, string(jsonData))
+	if err != nil {
+		fmt.Printf("[Engine Error] Failed to save history to SQLite: %v\n", err)
+	}
+
+	// メモリ上の最新50件も同期
+	e.loadHistoryFromDB()
+}
 func gitCommit(message string, file string) {
 	go func() {
 		// ローカルGit連携
@@ -528,7 +607,6 @@ func gitCommit(message string, file string) {
 }
 
 // --- 通知機能の実装 ---
-
 func sendSlack(webhookURL string, text string) {
 	if webhookURL == "" {
 		return
@@ -539,7 +617,6 @@ func sendSlack(webhookURL string, text string) {
 		_ = resp.Body.Close()
 	}
 }
-
 func sendEmail(settings Settings, subject, body string) {
 	if settings.SMTPHost == "" || settings.SMTPTo == "" {
 		// SMTP未設定の場合は標準出力とログにモック出力
@@ -551,7 +628,6 @@ func sendEmail(settings Settings, subject, body string) {
 	addr := fmt.Sprintf("%s:%s", settings.SMTPHost, settings.SMTPPort)
 	_ = smtp.SendMail(addr, auth, settings.SMTPFrom, []string{settings.SMTPTo}, msg)
 }
-
 func (e *Engine) notify(node *JobNode, trigger string, sessionID string, status string, exitVal int) {
 	notifyType := node.NotifyNormal // ジョブ個別の設定 (Normalに保存)
 	if notifyType == "" || notifyType == "default" {
@@ -560,11 +636,9 @@ func (e *Engine) notify(node *JobNode, trigger string, sessionID string, status 
 	if notifyType == "none" || notifyType == "" {
 		return
 	}
-
 	subject := fmt.Sprintf("[%s] Job %s %s (%s)", status, node.Name, trigger, sessionID)
 	body := fmt.Sprintf("Job Name: %s\nType: %s\nSession ID: %s\nStatus: %s\nExit Value: %d\nTime: %s\n",
 		node.Name, node.Type, sessionID, status, exitVal, time.Now().Format("2006-01-02 15:04:05"))
-
 	if notifyType == "slack" || notifyType == "both" {
 		go sendSlack(e.settings.SlackWebhook, fmt.Sprintf("*%s*\n%s", subject, body))
 	}
@@ -574,8 +648,7 @@ func (e *Engine) notify(node *JobNode, trigger string, sessionID string, status 
 }
 
 // --- ジョブエンジンのコアロジック ---
-
-func (e *Engine) StartSession(unitID string, triggerType string, triggerInfo string) string {
+func (e *Engine) StartSession(unitID string, triggerType string, triggerInfo string, runtimeArgs string) string {
 	e.mu.Lock()
 	unit, exists := e.jobs[unitID]
 	if !exists {
@@ -583,7 +656,6 @@ func (e *Engine) StartSession(unitID string, triggerType string, triggerInfo str
 		fmt.Printf("[Engine Error] StartSession failed: Job '%s' not found.\n", unitID)
 		return ""
 	}
-
 	sessionID := time.Now().Format("20060102150405") + fmt.Sprintf("-%03d", time.Now().Nanosecond()/1000000%1000)
 	session := &JobSession{
 		SessionID:   sessionID,
@@ -593,9 +665,9 @@ func (e *Engine) StartSession(unitID string, triggerType string, triggerInfo str
 		TriggerInfo: triggerInfo,
 		StartDate:   time.Now().Format("2006-01-02 15:04:05"),
 		Status:      "実行中",
+		RuntimeArgs: runtimeArgs,
 		Nodes:       make(map[string]*NodeState),
 	}
-
 	// セッション内のノード状態を構築
 	var collectNodes func(id string)
 	collectNodes = func(id string) {
@@ -608,44 +680,39 @@ func (e *Engine) StartSession(unitID string, triggerType string, triggerInfo str
 			status = "保留中"
 		}
 		session.Nodes[id] = &NodeState{
-			JobID:  id,
-			Name:   n.Name,
-			Type:   string(n.Type),
-			Status: status,
+			JobID:       id,
+			Name:        n.Name,
+			Type:        string(n.Type),
+			Status:      status,
+			RuntimeArgs: runtimeArgs,
 		}
 		for _, childID := range n.Children {
 			collectNodes(childID)
 		}
 	}
 	collectNodes(unitID)
-
 	e.sessions = append([]*JobSession{session}, e.sessions...) // 最新を先頭に
 	e.stateChanged[sessionID] = make(chan bool, 100)
 	e.saveHistory(session)
 	e.mu.Unlock()
-
 	go e.runSession(sessionID)
 	return sessionID
 }
-
 func (e *Engine) runSession(sessionID string) {
 	stateChan := e.getStateChan(sessionID)
 	if stateChan == nil {
 		return
 	}
-
 	for {
 		// セッションの終了判定と、実行可能ノードの探索
 		session := e.getSession(sessionID)
 		if session == nil || session.Status != "実行中" {
 			break
 		}
-
 		e.mu.Lock()
 		// 1. 各待機中のノードに対して、待ち条件の評価
 		allFinished := true
 		var runnableNodes []string
-
 		for id, state := range session.Nodes {
 			if state.Status == "待機中" {
 				allFinished = false
@@ -654,7 +721,6 @@ func (e *Engine) runSession(sessionID string) {
 					state.Status = "起動失敗"
 					continue
 				}
-
 				if e.evaluateWaitConditions(session, node) {
 					runnableNodes = append(runnableNodes, id)
 				}
@@ -663,12 +729,10 @@ func (e *Engine) runSession(sessionID string) {
 			}
 		}
 		e.mu.Unlock()
-
 		// 2. 実行可能になったノードを並列起動
 		for _, id := range runnableNodes {
 			go e.executeNode(sessionID, id)
 		}
-
 		if allFinished {
 			// セッション全体のステータス決定
 			e.mu.Lock()
@@ -691,35 +755,29 @@ func (e *Engine) runSession(sessionID string) {
 			e.mu.Unlock()
 			break
 		}
-
 		// 次の状態変化まで待機
 		select {
 		case <-stateChan:
 		case <-time.After(1 * time.Second): // セーフティポーリング
 		}
 	}
-
 	e.cleanupSession(sessionID)
 }
-
 func (e *Engine) evaluateWaitConditions(session *JobSession, node *JobNode) bool {
 	if len(node.WaitConditions) == 0 {
 		return true
 	}
-
 	conditionsMet := 0
 	for _, cond := range node.WaitConditions {
 		priorState, exists := session.Nodes[cond.JobID]
 		if !exists {
 			continue // 存在しない先行ジョブは無視（エラー扱い）
 		}
-
 		// 先行ジョブが終端状態かどうかチェック
 		isFinished := priorState.Status == "終了" || priorState.Status == "スキップ" || priorState.Status == "コマンド停止" || priorState.Status == "起動失敗"
 		if !isFinished {
 			continue
 		}
-
 		// 条件評価
 		met := false
 		if cond.Type == "status" {
@@ -739,18 +797,15 @@ func (e *Engine) evaluateWaitConditions(session *JobSession, node *JobNode) bool
 				met = true
 			}
 		}
-
 		if met {
 			conditionsMet++
 		}
 	}
-
 	if node.WaitRelation == "OR" {
 		return conditionsMet > 0
 	}
 	return conditionsMet == len(node.WaitConditions)
 }
-
 func (e *Engine) determineStatusFromRange(node *JobNode, exitVal int) string {
 	if node == nil {
 		return "異常終了"
@@ -765,7 +820,6 @@ func (e *Engine) determineStatusFromRange(node *JobNode, exitVal int) string {
 	}
 	return "異常終了"
 }
-
 func inRange(rangeStr string, val int) bool {
 	if rangeStr == "" {
 		return false
@@ -781,22 +835,18 @@ func inRange(rangeStr string, val int) bool {
 	}
 	return false
 }
-
 func (e *Engine) executeNode(sessionID string, jobID string) {
 	session := e.getSession(sessionID)
 	if session == nil {
 		return
 	}
-
 	e.mu.Lock()
 	state := session.Nodes[jobID]
 	node := e.jobs[jobID]
 	e.mu.Unlock()
-
 	if state == nil || node == nil {
 		return
 	}
-
 	// スキップの処理
 	if node.IsSkip {
 		e.mu.Lock()
@@ -810,7 +860,6 @@ func (e *Engine) executeNode(sessionID string, jobID string) {
 		e.notifyStateChanged(sessionID)
 		return
 	}
-
 	// 保留の処理
 	if state.Status == "保留中" {
 		// ユーザーの解除操作待ち。ポーリングするか、状態変化を待つ
@@ -828,30 +877,34 @@ func (e *Engine) executeNode(sessionID string, jobID string) {
 			}
 		}
 	}
-
 	e.mu.Lock()
 	state.Status = "実行中"
 	state.StartDate = time.Now().Format("2006-01-02 15:04:05")
 	e.saveHistory(session)
 	e.mu.Unlock()
 	e.notifyStateChanged(sessionID)
-
 	e.notify(node, "start", sessionID, "実行中", 0)
-
 	var exitCode int
 	var logBuf bytes.Buffer
-
-		if node.Type == TypeJob {
+	if node.Type == TypeJob {
 		// ジョブの実行（コマンドライン）
 		scriptPath := node.Command
-		argsStr := node.RunUser // RunUserフィールドを引数として再利用
+		argsStr := state.RuntimeArgs
+		if argsStr == "" {
+			argsStr = session.RuntimeArgs
+		}
+		if argsStr == "" {
+			if node.Args != "" {
+				argsStr = node.Args
+			} else {
+				argsStr = node.RunUser
+			}
+		}
 		argsStr = e.replaceVariables(argsStr, session, node)
-
 		cmdStr := scriptPath
 		if argsStr != "" {
 			cmdStr += " " + argsStr
 		}
-
 		var cmd *exec.Cmd
 		if runtime.GOOS == "windows" {
 			// Windowsの場合は拡張子が.batならそのまま実行、それ以外（.shなど）は git bash / sh があればそれを使うが、
@@ -860,14 +913,11 @@ func (e *Engine) executeNode(sessionID string, jobID string) {
 		} else {
 			cmd = exec.Command("sh", "-c", cmdStr)
 		}
-
 		cmd.Stdout = &logBuf
 		cmd.Stderr = &logBuf
-
 		e.mu.Lock()
 		e.activeCmds[sessionID+":"+jobID] = cmd
 		e.mu.Unlock()
-
 		err := cmd.Start()
 		if err != nil {
 			e.mu.Lock()
@@ -881,17 +931,14 @@ func (e *Engine) executeNode(sessionID string, jobID string) {
 			e.notifyStateChanged(sessionID)
 			return
 		}
-
 		e.mu.Lock()
 		state.PID = cmd.Process.Pid
 		e.saveHistory(session)
 		e.mu.Unlock()
-
 		err = cmd.Wait()
 		e.mu.Lock()
 		delete(e.activeCmds, sessionID+":"+jobID)
 		state.PID = 0
-
 		if err != nil {
 			if exitError, ok := err.(*exec.ExitError); ok {
 				exitCode = exitError.ExitCode()
@@ -902,7 +949,6 @@ func (e *Engine) executeNode(sessionID string, jobID string) {
 			exitCode = 0
 		}
 		e.mu.Unlock()
-
 	} else if node.Type == TypeNet {
 		// ジョブネットの実行（子ノードが終了するのを待つ）
 		// 子ノードがすべて終了するまでポーリング
@@ -912,13 +958,11 @@ func (e *Engine) executeNode(sessionID string, jobID string) {
 			if session == nil || session.Status != "実行中" {
 				return
 			}
-
 			e.mu.Lock()
 			childrenFinished := true
 			maxExitVal := 0
 			hasError := false
 			hasWarn := false
-
 			for _, childID := range node.Children {
 				cState := session.Nodes[childID]
 				if cState == nil || (cState.Status != "終了" && cState.Status != "スキップ" && cState.Status != "コマンド停止" && cState.Status != "起動失敗") {
@@ -937,7 +981,6 @@ func (e *Engine) executeNode(sessionID string, jobID string) {
 				}
 			}
 			e.mu.Unlock()
-
 			if childrenFinished {
 				exitCode = maxExitVal
 				if hasError {
@@ -951,7 +994,6 @@ func (e *Engine) executeNode(sessionID string, jobID string) {
 			}
 		}
 	}
-
 	// 終了ステータスの判定と更新
 	e.mu.Lock()
 	if state.Status != "コマンド停止" && state.Status != "中断" {
@@ -959,7 +1001,6 @@ func (e *Engine) executeNode(sessionID string, jobID string) {
 		state.ExitValue = exitCode
 		state.EndDate = time.Now().Format("2006-01-02 15:04:05")
 		state.Log = logBuf.String()
-
 		statusName := e.determineStatusFromRange(node, exitCode)
 		if statusName == "正常終了" {
 			e.notify(node, "normal", sessionID, "正常終了", exitCode)
@@ -971,10 +1012,8 @@ func (e *Engine) executeNode(sessionID string, jobID string) {
 	}
 	e.saveHistory(session)
 	e.mu.Unlock()
-
 	e.notifyStateChanged(sessionID)
 }
-
 func (e *Engine) replaceVariables(cmdStr string, session *JobSession, node *JobNode) string {
 	// ジョブ変数の置換
 	// ${START_DATE}, ${SESSION_ID}, ${TRIGGER_TYPE}, ${TRIGGER_INFO}
@@ -982,7 +1021,6 @@ func (e *Engine) replaceVariables(cmdStr string, session *JobSession, node *JobN
 	cmdStr = strings.ReplaceAll(cmdStr, "${SESSION_ID}", session.SessionID)
 	cmdStr = strings.ReplaceAll(cmdStr, "${TRIGGER_TYPE}", session.TriggerType)
 	cmdStr = strings.ReplaceAll(cmdStr, "${TRIGGER_INFO}", session.TriggerInfo)
-
 	// 親ユニットのユーザ変数も置換
 	if node.ParentID != "" {
 		var findUnit func(id string) *JobNode
@@ -1001,24 +1039,19 @@ func (e *Engine) replaceVariables(cmdStr string, session *JobSession, node *JobN
 			// 簡易変数置換
 		}
 	}
-
 	return cmdStr
 }
-
 func (e *Engine) StopNode(sessionID string, jobID string, control string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
 	session := e.findSession(sessionID)
 	if session == nil {
 		return
 	}
-
 	state := session.Nodes[jobID]
 	if state == nil {
 		return
 	}
-
 	if control == "保留" {
 		state.Status = "保留中"
 	} else if control == "保留解除" {
@@ -1057,7 +1090,6 @@ func (e *Engine) StopNode(sessionID string, jobID string, control string) {
 			}
 		}
 	}
-
 	e.saveHistory(session)
 	go e.notifyStateChanged(sessionID)
 }
@@ -1068,7 +1100,6 @@ func (e *Engine) getSession(sessionID string) *JobSession {
 	defer e.mu.Unlock()
 	return e.findSession(sessionID)
 }
-
 func (e *Engine) findSession(sessionID string) *JobSession {
 	for _, s := range e.sessions {
 		if s.SessionID == sessionID {
@@ -1077,13 +1108,11 @@ func (e *Engine) findSession(sessionID string) *JobSession {
 	}
 	return nil
 }
-
 func (e *Engine) getStateChan(sessionID string) chan bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.stateChanged[sessionID]
 }
-
 func (e *Engine) notifyStateChanged(sessionID string) {
 	e.mu.Lock()
 	ch, exists := e.stateChanged[sessionID]
@@ -1095,13 +1124,11 @@ func (e *Engine) notifyStateChanged(sessionID string) {
 		}
 	}
 }
-
 func (e *Engine) cleanupSession(sessionID string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	delete(e.stateChanged, sessionID)
 }
-
 func (e *Engine) StartMonitoring() {
 	ticker := time.NewTicker(1 * time.Minute)
 	go func() {
@@ -1110,7 +1137,6 @@ func (e *Engine) StartMonitoring() {
 		}
 	}()
 }
-
 func (e *Engine) checkAllMonitors() {
 	e.mu.Lock()
 	var monitorsCopy []MonitorSetting
@@ -1118,12 +1144,10 @@ func (e *Engine) checkAllMonitors() {
 		monitorsCopy = append(monitorsCopy, *m)
 	}
 	e.mu.Unlock()
-
 	for _, m := range monitorsCopy {
 		e.runMonitor(&m)
 	}
 }
-
 func (e *Engine) runMonitor(m *MonitorSetting) {
 	e.mu.Lock()
 	node, exists := e.nodes[m.NodeID]
@@ -1131,10 +1155,8 @@ func (e *Engine) runMonitor(m *MonitorSetting) {
 	if !exists {
 		return
 	}
-
 	status := "正常"
 	logDetail := "Success"
-
 	switch m.Type {
 	case "ping":
 		var cmd *exec.Cmd
@@ -1170,20 +1192,15 @@ func (e *Engine) runMonitor(m *MonitorSetting) {
 			conn.Close()
 		}
 	}
-
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
 	orig, exists := e.monitors[m.ID]
 	if !exists {
 		return
 	}
-
 	statusChanged := orig.LastStatus != status && orig.LastStatus != "未実施"
-
 	orig.LastStatus = status
 	orig.LastCheck = time.Now().Format("2006-01-02 15:04:05")
-
 	historyItem := MonitorHistory{
 		CheckTime: orig.LastCheck,
 		MonitorID: orig.ID,
@@ -1197,25 +1214,80 @@ func (e *Engine) runMonitor(m *MonitorSetting) {
 	if len(e.monHistory) > 50 {
 		e.monHistory = e.monHistory[:50]
 	}
-
 	e.saveMonitors()
 	e.appendMonHistoryLog(historyItem)
-
 	if statusChanged {
 		e.notifyMonitor(orig, node, status, logDetail)
 	}
 }
-
+func (e *Engine) resolveOrCreateJobForScript(scriptTarget string) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if strings.HasPrefix(scriptTarget, "job_") {
+		if _, exists := e.jobs[scriptTarget]; exists {
+			return scriptTarget
+		}
+	}
+	for _, j := range e.jobs {
+		if j.Name == scriptTarget {
+			return j.ID
+		}
+	}
+	normalizedPath := strings.ReplaceAll(scriptTarget, "\\", "/")
+	if !strings.HasPrefix(normalizedPath, "scripts/") && (strings.HasSuffix(normalizedPath, ".sh") || strings.HasSuffix(normalizedPath, ".bat") || strings.HasSuffix(normalizedPath, ".py") || strings.HasSuffix(normalizedPath, ".exe")) {
+		normalizedPath = "scripts/" + normalizedPath
+	}
+	if strings.HasPrefix(normalizedPath, "scripts/") {
+		jobName := strings.TrimPrefix(normalizedPath, "scripts/")
+		for _, j := range e.jobs {
+			if j.Command == normalizedPath {
+				return j.ID
+			}
+		}
+		newJobID := "job_" + fmt.Sprintf("%d", time.Now().UnixNano())
+		newJob := &JobNode{
+			ID:       newJobID,
+			Name:     jobName,
+			Type:     TypeJob,
+			Command:  normalizedPath,
+			Children: []string{},
+		}
+		e.jobs[newJobID] = newJob
+		e.saveJobs()
+		return newJobID
+	}
+	return ""
+}
 func (e *Engine) notifyMonitor(m *MonitorSetting, node *ManagedNode, status string, logDetail string) {
+	if status == "異常" && m.OnErrorScript != "" {
+		resolvedJobID := e.resolveOrCreateJobForScript(m.OnErrorScript)
+		if resolvedJobID != "" {
+			args := m.OnErrorArgs
+			args = strings.ReplaceAll(args, "{{NodeName}}", node.Name)
+			args = strings.ReplaceAll(args, "{{NodeIP}}", node.IPAddress)
+			args = strings.ReplaceAll(args, "{{MonitorName}}", m.Name)
+			args = strings.ReplaceAll(args, "{{Status}}", status)
+
+			go e.StartSession(resolvedJobID, "監視異常検知", fmt.Sprintf("監視: %s (%s)", m.Name, node.Name), args)
+		}
+	} else if status == "正常" && m.OnNormalScript != "" {
+		resolvedJobID := e.resolveOrCreateJobForScript(m.OnNormalScript)
+		if resolvedJobID != "" {
+			args := m.OnNormalArgs
+			args = strings.ReplaceAll(args, "{{NodeName}}", node.Name)
+			args = strings.ReplaceAll(args, "{{NodeIP}}", node.IPAddress)
+			args = strings.ReplaceAll(args, "{{MonitorName}}", m.Name)
+			args = strings.ReplaceAll(args, "{{Status}}", status)
+			go e.StartSession(resolvedJobID, "監視正常復帰", fmt.Sprintf("監視: %s (%s)", m.Name, node.Name), args)
+		}
+	}
 	notifyType := e.settings.DefaultNotify
 	if notifyType == "" || notifyType == "none" {
 		return
 	}
-
 	subject := fmt.Sprintf("[%s] Node Monitor: %s (Node: %s)", status, m.Name, node.Name)
 	body := fmt.Sprintf("Monitor: %s\nType: %s\nNode: %s (IP: %s)\nStatus: %s\nLog: %s\nTime: %s\n",
 		m.Name, m.Type, node.Name, node.IPAddress, status, logDetail, time.Now().Format("2006-01-02 15:04:05"))
-
 	if notifyType == "slack" || notifyType == "both" {
 		go sendSlack(e.settings.SlackWebhook, fmt.Sprintf("*%s*\n%s", subject, body))
 	}
@@ -1223,7 +1295,6 @@ func (e *Engine) notifyMonitor(m *MonitorSetting, node *ManagedNode, status stri
 		go sendEmail(e.settings, subject, body)
 	}
 }
-
 func StartScheduler() {
 	ticker := time.NewTicker(1 * time.Minute)
 	go func() {
@@ -1234,14 +1305,13 @@ func StartScheduler() {
 			schedules := make([]Schedule, len(engine.schedules))
 			copy(schedules, engine.schedules)
 			engine.mu.Unlock()
-
 			for _, sched := range schedules {
 				if !sched.Enabled {
 					continue
 				}
 				if matchSchedule(sched, now) {
 					fmt.Printf("[Scheduler] Triggering job: %s (Schedule: %s)\n", sched.JobID, sched.Name)
-					sessionID := engine.StartSession(sched.JobID, "スケジュール", sched.Name)
+					sessionID := engine.StartSession(sched.JobID, "スケジュール", sched.Name, sched.Args)
 					if sessionID == "" {
 						fmt.Printf("[Scheduler Error] Failed to start session: Job '%s' does not exist (Schedule: %s)\n", sched.JobID, sched.Name)
 					}
@@ -1250,7 +1320,6 @@ func StartScheduler() {
 		}
 	}()
 }
-
 func matchSchedule(sched Schedule, t time.Time) bool {
 	if !sched.Enabled {
 		return false
@@ -1261,8 +1330,7 @@ func matchSchedule(sched Schedule, t time.Time) bool {
 	if interval <= 0 {
 		interval = 1
 	}
-
-		switch sched.Type {
+	switch sched.Type {
 	case "cron":
 		return matchCronSchedule(sched.CronExpr, t)
 	case "daily":
@@ -1302,7 +1370,6 @@ func matchSchedule(sched Schedule, t time.Time) bool {
 }
 
 // --- Web UI & Handler ---
-
 const htmlTemplate = `<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -1335,7 +1402,6 @@ const htmlTemplate = `<!DOCTYPE html>
             color: #e0e0e0 !important;
             border: 1px solid #555 !important;
         }
-
         [data-theme="dark"] {
             --bg-color: #121212;
             --panel-bg: #1e1e1e;
@@ -1360,7 +1426,6 @@ const htmlTemplate = `<!DOCTYPE html>
             padding: 0;
             font-size: 12px;
         }
-
         /* ツールバー (タブ・パースペクティブ) */
         .toolbar {
             background: var(--toolbar-bg);
@@ -1396,7 +1461,6 @@ const htmlTemplate = `<!DOCTYPE html>
             padding-bottom: 6px;
             border-top: 3px solid #1d50a2;
         }
-
         /* コンテナ */
         .container {
             padding: 5px;
@@ -1429,7 +1493,6 @@ const htmlTemplate = `<!DOCTYPE html>
             box-sizing: border-box;
             overflow-y: auto;
         }
-
         /* ビューのタイトルバー */
         .view-title {
             background: var(--header-bg);
@@ -1441,14 +1504,12 @@ const htmlTemplate = `<!DOCTYPE html>
             justify-content: space-between;
             align-items: center;
         }
-
         .view-content {
             padding: 8px;
             flex: 1;
             overflow-y: auto;
             box-sizing: border-box;
         }
-
         /* ツリーノード */
         .tree-node {
             padding: 2px;
@@ -1474,7 +1535,6 @@ const htmlTemplate = `<!DOCTYPE html>
         .tree-link:hover {
             text-decoration: underline;
         }
-
         
         a {
             color: #0d47a1;
@@ -1482,7 +1542,6 @@ const htmlTemplate = `<!DOCTYPE html>
         [data-theme="dark"] a {
             color: #64b5f6 !important;
         }
-
         /* テーブル */
         table {
             width: 100%;
@@ -1505,7 +1564,6 @@ const htmlTemplate = `<!DOCTYPE html>
         tr:hover {
             background: #f2f7fc;
         }
-
         /* ボタン */
         button, .btn {
             background: linear-gradient(to bottom, #fcfcfc, #e6e6e6);
@@ -1576,7 +1634,6 @@ const htmlTemplate = `<!DOCTYPE html>
         [data-theme="dark"] .btn-success:hover {
             background: #2f5a2f !important;
         }
-
         /* 下部ステータス集計バー (Himenos再現) */
         .summary-bar {
             border-top: 1px solid var(--border-color);
@@ -1611,7 +1668,6 @@ const htmlTemplate = `<!DOCTYPE html>
             color: #333;
             font-weight: bold;
         }
-
         /* 最下部システムステータスバー */
         .status-bar {
             background: var(--status-bar-bg);
@@ -1628,7 +1684,6 @@ const htmlTemplate = `<!DOCTYPE html>
             display: flex;
             justify-content: space-between;
         }
-
         /* ステータス表示バッジ */
         .badge { display: inline-block; padding: 1px 3px; border-radius: 2px; font-size: 10px; font-weight: bold; white-space: nowrap; }
         .status-running { background: #2196f3; color: #fff; }
@@ -1636,14 +1691,12 @@ const htmlTemplate = `<!DOCTYPE html>
         .status-warn { background: #ffeb3b; color: var(--text-color); }
         .status-error { background: #ff4d4d; color: #fff; }
         .status-hold { background: #9e9e9e; color: #fff; }
-
         label { display: block; font-weight: bold; margin-top: 10px; margin-bottom: 5px; }
         .help-text { color: #666; font-size: 11px; margin-bottom: 5px; }
         .error-message { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; padding: 8px; margin-bottom: 10px; border-radius: 4px; }
         
         .refresh-icon { text-decoration: none; color: #1e395b; font-weight: bold; font-size: 12px; }
         .refresh-icon:hover { color: #1d50a2; }
-
         /* ジョブフロー進捗マップ用スタイル */
         .flow-container {
             display: flex;
@@ -1672,7 +1725,6 @@ const htmlTemplate = `<!DOCTYPE html>
         .flow-node-error, .topo-node.flow-node-error { background: #ff4d4d; color: #fff; }
         .flow-node-unknown, .topo-node.flow-node-unknown { background: #9e9e9e; color: #fff; }
         .flow-arrow { font-size: 16px; font-weight: bold; color: #666; }
-
         /* トポロジー監視マップ用スタイル */
         .topology-map {
             background: #ffffff;
@@ -1700,7 +1752,6 @@ const htmlTemplate = `<!DOCTYPE html>
         .topo-node.topo-err { background: #ff4d4d; color: #fff; }
         .topo-node.topo-warn { background: #ffeb3b; color: var(--text-color); }
         .topo-node.topo-unknown { background: #2196f3; color: #fff; }
-
         /* 3分割画面レイアウト用 */
         .split-layout {
             display: flex;
@@ -1812,7 +1863,6 @@ const htmlTemplate = `<!DOCTYPE html>
             -webkit-box-shadow: 0 0 0px 1000px #2d2d2d inset !important;
             transition: background-color 5000s ease-in-out 0s;
         }
-
     </style>
     <script>
         function updateScheduleForm() {
@@ -1826,9 +1876,7 @@ const htmlTemplate = `<!DOCTYPE html>
             const hour = document.getElementById('input_hour');
             const minute = document.getElementById('input_minute');
             const interval = document.getElementById('input_interval');
-
             if (!runDate) return; // スケジュール設定画面以外のタブでは何もしない
-
             // 一旦すべての項目を無効化 (disabled)
             runDate.disabled = true;
             cronExpr.disabled = true;
@@ -1836,14 +1884,12 @@ const htmlTemplate = `<!DOCTYPE html>
             hour.disabled = true;
             minute.disabled = true;
             interval.disabled = true;
-
             // スタイルをグレーアウト化
             [runDate, cronExpr, weekday, hour, minute, interval].forEach(el => {
                 el.style.background = '#e1e1e1';
                 el.style.color = '#888';
                 el.style.cursor = 'not-allowed';
             });
-
             // 選択した種別に対応する項目を有効化 (enabled)
             if (type === 'daily') {
                 hour.disabled = false;
@@ -1866,7 +1912,6 @@ const htmlTemplate = `<!DOCTYPE html>
             } else if (type === 'cron') {
                 cronExpr.disabled = false;
             }
-
             // 有効化された項目のスタイルを復元
             [runDate, cronExpr, weekday, hour, minute, interval].forEach(el => {
                 if (!el.disabled) {
@@ -1876,7 +1921,6 @@ const htmlTemplate = `<!DOCTYPE html>
                 }
             });
         }
-
         function toggleNewScriptFields() {
             const select = document.getElementById('script_select');
             const fields = document.getElementById('new_script_fields');
@@ -1888,7 +1932,6 @@ const htmlTemplate = `<!DOCTYPE html>
                 }
             }
         }
-
         // DOM構築完了時、および全体読み込み完了時に実行
         window.addEventListener('DOMContentLoaded', updateScheduleForm);
         window.addEventListener('load', updateScheduleForm);
@@ -1937,7 +1980,6 @@ const htmlTemplate = `<!DOCTYPE html>
             localStorage.setItem('theme', targetTheme);
             updateThemeButtonLabel(targetTheme);
         }
-
         function updateThemeButtonLabel(theme) {
             const btn = document.getElementById('theme_btn');
             if (!btn) return;
@@ -1948,7 +1990,6 @@ const htmlTemplate = `<!DOCTYPE html>
                 btn.innerHTML = isEn ? '🌙 Dark Mode' : '🌙 ダークモード';
             }
         }
-
         // 初期ロード時のダークモード適用
         (function() {
             const savedTheme = localStorage.getItem('theme') || 'light';
@@ -1957,17 +1998,16 @@ const htmlTemplate = `<!DOCTYPE html>
                 updateThemeButtonLabel(savedTheme);
             });
         })();
-
         // 多言語翻訳
         const translations = {
             ja: {
-                "jobs_manage": "📋 ジョブ管理",
+                "jobs_manage": "📋 スクリプト管理",
                 "nodes_manage": "🖥️ ノード・監視",
                 "env_settings": "⚙️ 環境構築",
-                "job_def_list": "ジョブ定義[一覧]",
+                "job_def_list": "スクリプト定義[一覧]",
                 "real_script_list": "📁 実スクリプトファイル一覧",
-                "job_def_detail": "ジョブ定義[詳細]",
-                "job_history": "📊 ジョブ履歴",
+                "job_def_detail": "スクリプト定義[詳細]",
+                "job_history": "📊 実行履歴",
                 "session_detail": "セッション詳細",
                 "schedule_list": "📅 スケジュール一覧",
                 "schedule_add": "➕ スケジュール追加",
@@ -1976,7 +2016,7 @@ const htmlTemplate = `<!DOCTYPE html>
                 "script_body_lbl": "スクリプト本文 (Git連携):",
                 "btn_save": "💾 保存",
                 "btn_cancel": "キャンセル",
-                "hist_header_unit": "実行対象ユニット/ジョブ",
+                "hist_header_unit": "実行対象フォルダ/スクリプト",
                 "hist_header_start": "開始日時",
                 "hist_header_end": "終了日時",
                 "hist_header_result": "実行結果",
@@ -1984,12 +2024,12 @@ const htmlTemplate = `<!DOCTYPE html>
                 "btn_enable": "有効",
                 "btn_help": "ヘルプ",
                 "cron_help_title": "❓ crontab 記述方法のヘルプ",
-                "btn_create_job": "＋ ジョブ作成",
-                "btn_create_unit": "＋ ユニット作成",
+                "btn_create_job": "＋ スクリプト作成",
+                "btn_create_unit": "＋ フォルダ作成",
                 "schedule_bulk_title": "📝 スケジュール一括登録・編集 (crontab -e 互換)",
                 "btn_save_bulk_sched": "💾 スケジュール一括保存 (適用)",
                 "lbl_schedule_name": "スケジュール名:",
-                "lbl_target_job": "実行対象ジョブ:",
+                "lbl_target_job": "実行対象スクリプト:",
                 "lbl_setting_type": "設定タイプ:",
                 "lbl_run_date": "日付 (日時指定用):",
                 "lbl_cron_expr": "crontab設定 (例: */15 * * * *):",
@@ -2004,8 +2044,8 @@ const htmlTemplate = `<!DOCTYPE html>
                 "lbl_job_new_script_name": "新規作成ファイル名 (新規作成時のみ):",
                 "lbl_job_new_script_body": "スクリプト内容 (新規作成時のみ):",
                 "lbl_job_args": "引数 (任意):",
-                "lbl_job_wait": "待ち条件 (先行ジョブ、複数ある場合はカンマ区切り):",
-                "lbl_job_wait_help": "指定したジョブが正常終了すると起動します。ジョブ名で指定してください。",
+                "lbl_job_wait": "待ち条件 (先行スクリプト、複数ある場合はカンマ区切り):",
+                "lbl_job_wait_help": "指定したスクリプトが正常終了すると起動します。スクリプト名で指定してください。",
                 "lbl_job_notify": "個別の通知設定:",
                 "btn_save_job": "💾 作成して保存",
                 "settings_title": "環境構築 (通知設定 & バックアップ)",
@@ -2045,13 +2085,13 @@ const htmlTemplate = `<!DOCTYPE html>
                 "sec_ip_rescue_help": "※ IP制限が有効な場合でも、ローカルホスト（127.0.0.1, ::1, localhost）からのアクセスは常に制限チェックから除外（救済許可）されます。これにより、誤ったIPアドレスを登録してしまい、管理者が自分自身でサーバーに二度とアクセスできなくなってしまう締め出し事故を完全に防ぎます。"
             },
             en: {
-                "jobs_manage": "📋 Jobs",
+                "jobs_manage": "📋 Scripts",
                 "nodes_manage": "🖥️ Nodes & Monitors",
                 "env_settings": "⚙️ Settings",
-                "job_def_list": "Job Definitions",
+                "job_def_list": "Script Definitions",
                 "real_script_list": "📁 Real Scripts",
-                "job_def_detail": "Job Details",
-                "job_history": "📊 Job History",
+                "job_def_detail": "Script Details",
+                "job_history": "📊 Run History",
                 "session_detail": "Session Detail",
                 "schedule_list": "📅 Schedules",
                 "schedule_add": "➕ Add Schedule",
@@ -2060,16 +2100,16 @@ const htmlTemplate = `<!DOCTYPE html>
                 "script_body_lbl": "Script Content (Git Linked):",
                 "btn_save": "💾 Save",
                 "btn_cancel": "Cancel",
-                "hist_header_unit": "Target Unit/Job",
+                "hist_header_unit": "Target Folder/Script",
                 "hist_header_start": "Start Date",
                 "hist_header_end": "End Date",
                 "hist_header_result": "Result",
-                "btn_create_job": "+ Create Job",
-                "btn_create_unit": "+ Create Unit",
+                "btn_create_job": "+ Create Script",
+                "btn_create_unit": "+ Create Folder",
                 "schedule_bulk_title": "📝 Bulk Schedule Editor (crontab -e)",
                 "btn_save_bulk_sched": "Bulk Save Schedules",
                 "lbl_schedule_name": "Schedule Name:",
-                "lbl_target_job": "Target Job:",
+                "lbl_target_job": "Target Script:",
                 "lbl_setting_type": "Setting Type:",
                 "lbl_run_date": "Run Date (Once):",
                 "lbl_cron_expr": "crontab (e.g. */15 * * * *):",
@@ -2084,7 +2124,7 @@ const htmlTemplate = `<!DOCTYPE html>
                 "lbl_job_new_script_name": "Script Filename (For New File Only):",
                 "lbl_job_new_script_body": "Script Content (For New File Only):",
                 "lbl_job_args": "Arguments (Optional):",
-                "lbl_job_wait": "Wait Conditions (Comma separated if multiple):",
+                "lbl_job_wait": "Wait Conditions (Predecessor Scripts):",
                 "lbl_job_wait_help": "Starts automatically when the specified job finishes successfully.",
                 "lbl_job_notify": "Individual Notification Settings:",
                 "btn_save_job": "💾 Create & Save",
@@ -2125,14 +2165,12 @@ const htmlTemplate = `<!DOCTYPE html>
                 "sec_ip_rescue_help": "* Localhost (127.0.0.1, ::1, localhost) is always allowed even if IP restriction is enabled, preventing accidental lockout of the administrator."
             }
         };
-
         function toggleLanguage() {
             const currentLang = localStorage.getItem('lang') || 'ja';
             const targetLang = currentLang === 'ja' ? 'en' : 'ja';
             localStorage.setItem('lang', targetLang);
             applyLanguage(targetLang);
         }
-
                         function translateTextNodes(node, lang) {
             if (node.nodeType === 3) {
                 let txt = node.nodeValue;
@@ -2163,7 +2201,6 @@ const htmlTemplate = `<!DOCTYPE html>
                 node.childNodes.forEach(child => translateTextNodes(child, lang));
             }
         }
-
         function applyLanguage(lang) {
             document.querySelectorAll('[data-i18n]').forEach(el => {
                 const key = el.getAttribute('data-i18n');
@@ -2173,7 +2210,6 @@ const htmlTemplate = `<!DOCTYPE html>
             });
             
             translateTextNodes(document.body, lang);
-
             const langBtn = document.getElementById('lang_btn');
             if (langBtn) {
                 langBtn.innerHTML = lang === 'ja' ? '🌐 English' : '🌐 日本語';
@@ -2181,15 +2217,12 @@ const htmlTemplate = `<!DOCTYPE html>
             const currentTheme = document.documentElement.getAttribute('data-theme') || 'light';
             updateThemeButtonLabel(currentTheme);
         }
-
         function showCronHelpModal() {
             document.getElementById('cron_help_modal').style.display = 'flex';
         }
-
         function hideCronHelpModal() {
             document.getElementById('cron_help_modal').style.display = 'none';
         }
-
         function formatHistoryDates() {
             const rows = document.querySelectorAll('.history-table tbody tr');
             rows.forEach(row => {
@@ -2210,7 +2243,6 @@ const htmlTemplate = `<!DOCTYPE html>
                             startCell.style.whiteSpace = 'nowrap';
                         }
                     }
-
                     // 終了日時
                     const endCell = cells[2];
                     const endText = endCell.innerText.trim();
@@ -2223,12 +2255,318 @@ const htmlTemplate = `<!DOCTYPE html>
                 }
             });
         }
-
         // 初期ロード時の言語適用
         window.addEventListener('DOMContentLoaded', () => {
             const savedLang = localStorage.getItem('lang') || 'ja';
             applyLanguage(savedLang);
+    
+        // サーバーから渡された初期データをJSにパースして保持
+        const jobsData = {{if .JobsJSON}}JSON.parse({{.JobsJSON}}){{else}}{}{{end}};
+        const schedulesData = {{if .SchedulesJSON}}JSON.parse({{.SchedulesJSON}}){{else}}[]{{end}};
+        const monitorsData = {{if .MonitorsJSON}}JSON.parse({{.MonitorsJSON}}){{else}}{}{{end}};
+        let activeLiveLogInterval = null;
+        let activeHistoryInterval = null;
+        let selectedSessionID = "";
+        // トースト通知表示関数
+        function showToast(message) {
+            let container = document.getElementById('toast_container');
+            if (!container) {
+                container = document.createElement('div');
+                container.id = 'toast_container';
+                container.style.position = 'fixed';
+                container.style.bottom = '20px';
+                container.style.right = '20px';
+                container.style.zIndex = '9999';
+                container.style.display = 'flex';
+                container.style.flexDirection = 'column';
+                container.style.gap = '8px';
+                document.body.appendChild(container);
+            }
+            const toast = document.createElement('div');
+            toast.style.background = 'var(--card-bg)';
+            toast.style.color = 'var(--text-color)';
+            toast.style.borderLeft = '4px solid #00aa00';
+            toast.style.boxShadow = '0 2px 10px rgba(0,0,0,0.15)';
+            toast.style.padding = '10px 15px';
+            toast.style.borderRadius = '4px';
+            toast.style.fontSize = '12px';
+            toast.style.fontWeight = 'bold';
+            toast.style.opacity = '0';
+            toast.style.transition = 'opacity 0.3s ease';
+            toast.innerText = message;
+            container.appendChild(toast);
+            
+            setTimeout(function() { toast.style.opacity = '1'; }, 50);
+            setTimeout(function() {
+                toast.style.opacity = '0';
+                setTimeout(function() { toast.remove(); }, 300);
+            }, 3000);
+        }
+        // 動的詳細ペイン表示処理（スクリプト定義[詳細]）
+        function showNodeDetail(nodeId, element) {
+            document.querySelectorAll('.tree-node').forEach(function(node) {
+                node.classList.remove('tree-active');
+            });
+            if (element) {
+                element.closest('.tree-node').classList.add('tree-active');
+            }
+            const node = jobsData[nodeId];
+            if (!node) return;
+            const wrapper = document.getElementById('detail_pane_wrapper');
+            if (!wrapper) return;
+            let html = "<h3>" + node.name + "</h3>";
+            html += "<table border='1' cellspacing='0' cellpadding='4' style='font-size: 12px; width: 100%;'>";
+            html += "<tr><th style='width: 30%;'>項目</th><th>設定値</th></tr>";
+            html += "<tr><th>スクリプト名</th><td>" + node.name + "</td></tr>";
+            if (node.type === 'job') {
+                html += "<tr><th>実行スクリプト</th><td><code>" + (node.command || '') + "</code></td></tr>";
+                const runArgs = node.args || node.run_user || '';
+                if (runArgs) {
+                    html += "<tr><th>デフォルト引数</th><td><code>" + runArgs + "</code></td></tr>";
+                }
+            }
+            if (node.wait_conditions && node.wait_conditions.length > 0) {
+                html += "<tr><th>待ち条件 (先行スクリプト)</th><td>";
+                node.wait_conditions.forEach(function(c) {
+                    const targetNode = jobsData[c.job_id];
+                    const targetName = targetNode ? targetNode.name : c.job_id;
+                    html += targetName + " (正常終了待ち)<br>";
+                });
+                html += "</td></tr>";
+            }
+            let notifyText = "デフォルト設定に従う";
+            if (node.notify_normal === "none") notifyText = "例外: 通知しない";
+            else if (node.notify_normal === "both") notifyText = "例外: メール & Slack 両方";
+            else if (node.notify_normal === "slack") notifyText = "例外: Slack のみ";
+            else if (node.notify_normal === "email") notifyText = "例外: メール のみ";
+            html += "<tr><th>通知設定</th><td>" + notifyText + "</td></tr>";
+            html += "</table>";
+            html += "<div style='margin-top: 15px; display: flex; gap: 5px; flex-wrap: wrap;'>";
+            if (node.type === 'unit' || (node.type === 'job' && node.command)) {
+                html += "<form action='/action' method='POST' onsubmit='runJobAjax(event, \"" + node.id + "\")' style='margin:0; display:flex; gap:5px; align-items:center;'>";
+                html += "<input type='hidden' name='action' value='run_job'>";
+                html += "<input type='hidden' name='id' value='" + node.id + "'>";
+                html += "<input type='text' name='args' id='input_manual_run_args' placeholder='実行引数を指定 (任意)' value='" + (node.args || '') + "' style='font-size: 11px; padding: 2px; width: 140px; box-sizing: border-box;'>";
+                html += "<button type='submit' class='btn btn-primary' style='padding: 2px 8px; font-size: 12px;'>⚡ スクリプトの実行</button>";
+                html += "</form>";
+            }
+            html += "<a href='/?tab=job_edit&id=" + node.id + "' class='btn'>✏️ 変更 / スクリプト編集</a>";
+            if (node.type === 'unit' || node.type === 'net') {
+                html += "<a href='/?tab=job_new&type=net&parent=" + node.id + "' class='btn'>📂 下位ネット作成</a>";
+                html += "<a href='/?tab=job_new&type=job&parent=" + node.id + "' class='btn btn-primary'>📄 下位ジョブ作成</a>";
+            }
+            html += "<form action='/action' method='POST' style='margin:0;'>";
+            html += "<input type='hidden' name='action' value='delete_job'>";
+            html += "<input type='hidden' name='id' value='" + node.id + "'>";
+            html += "<button type='submit' class='btn btn-danger' onclick='return confirm(\"本当に削除しますか？\");'>🗑️ 削除</button>";
+            html += "</form>";
+            html += "</div>";
+            wrapper.innerHTML = html;
+        }
+        // 手動実行のAJAX化
+        function runJobAjax(event, jobId) {
+            event.preventDefault();
+            const form = event.target;
+            const argsInput = form.querySelector('input[name="args"]');
+            const args = argsInput ? argsInput.value : '';
+            showToast("🚀 実行をリクエストしました...");
+            const formData = new FormData();
+            formData.append("action", "run_job");
+            formData.append("id", jobId);
+            formData.append("args", args);
+            fetch('/action', {
+                method: 'POST',
+                body: formData
+            })
+            .then(function(response) {
+                if (response.ok) {
+                    showToast("✅ 実行セッションが正常に開始されました");
+                    refreshHistoryPane();
+                } else {
+                    showToast("❌ 実行セッションの開始に失敗しました");
+                }
+            })
+            .catch(function(err) {
+                showToast("❌ 通信エラーが発生しました");
+            });
+        }
+        // ジョブ履歴一覧のAJAXリフレッシュ
+        function refreshHistoryPane() {
+            fetch('/?api=history')
+            .then(function(res) { return res.json(); })
+            .then(function(sessions) {
+                const tbody = document.getElementById('history_tbody');
+                if (!tbody) return;
+                let html = '';
+                sessions.forEach(function(s) {
+                    const isActive = s.session_id === selectedSessionID ? 'tree-active' : '';
+                    let badgeClass = 'status-run';
+                    if (s.status === '正常終了') badgeClass = 'status-success';
+                    else if (s.status === '異常終了') badgeClass = 'status-error';
+                    else if (s.status === '警告終了') badgeClass = 'status-hold';
+                    html += '<tr class="' + isActive + '">';
+                    html += '<td><a href="javascript:void(0);" onclick="loadSessionDetail(\'' + s.session_id + '\')">' + s.start_date + '</a></td>';
+                    html += '<td>' + (s.end_date || '') + '</td>';
+                    html += '<td><span class="badge ' + badgeClass + '">' + s.status + '</span></td>';
+                    html += '<td>' + s.unit_name + '</td>';
+                    html += '</tr>';
+                });
+                if (sessions.length === 0) {
+                    html = '<tr><td colspan="4">履歴がありません。</td></tr>';
+                }
+                tbody.innerHTML = html;
+                formatHistoryDates();
+            });
+        }
+        // セッション詳細・統合ログのAJAXロード
+        function loadSessionDetail(sessionId) {
+            selectedSessionID = sessionId;
+            
+            document.querySelectorAll('.history-table tbody tr').forEach(function(row) {
+                row.classList.remove('tree-active');
+            });
+            const clickedLink = document.querySelector("a[onclick*='" + sessionId + "']");
+            if (clickedLink) {
+                clickedLink.closest('tr').classList.add('tree-active');
+            }
+            fetch('/?api=session_detail&session_id=' + sessionId)
+            .then(function(res) { return res.json(); })
+            .then(function(s) {
+                const wrapper = document.getElementById('session_detail_wrapper');
+                if (!wrapper) return;
+                let badgeClass = 'status-run';
+                if (s.status === '正常終了') badgeClass = 'status-success';
+                else if (s.status === '異常終了') badgeClass = 'status-error';
+                else if (s.status === '警告終了') badgeClass = 'status-hold';
+                let html = '<div class="view-title" style="margin: -10px -10px 10px -10px;"><span><span data-i18n="session_detail">セッション詳細</span>: ' + s.session_id + '</span></div>';
+                html += '<div style="font-size:12px; margin-bottom:10px;">';
+                html += '<strong>全体状態:</strong> <span class="badge ' + badgeClass + '">' + s.status + '</span>';
+                html += '</div>';
+                html += '<div class="topology-map" style="padding:10px; font-size:11px; margin-bottom:10px; max-height:120px; overflow-y:auto; white-space: normal;">';
+                
+                const nodesList = [];
+                for (const jobID in s.nodes) {
+                    nodesList.push(s.nodes[jobID]);
+                }
+                nodesList.forEach(function(node) {
+                    let flowClass = 'flow-node-unknown';
+                    if (node.status === '実行中') flowClass = 'flow-node-run';
+                    else if (node.status === '起動失敗') flowClass = 'flow-node-error';
+                    else if (node.status === '正常終了' || node.status === '終了' || node.status === '正常') flowClass = 'flow-node-success';
+                    else if (node.status === '警告終了' || node.status === '警告') flowClass = 'flow-node-warn';
+                    else if (node.status === '異常終了' || node.status === '異常') flowClass = 'flow-node-error';
+                    html += '<span class="topo-node ' + flowClass + '"><a href="javascript:void(0);" onclick="loadNodeLog(\'' + s.session_id + '\', \'' + node.job_id + '\')" style="color:inherit;">' + node.name + ' [' + node.status + ']</a></span>';
+                    html += '<span class="flow-arrow"> → </span>';
+                });
+                html += '<span>完了</span></div>';
+                let logParts = [];
+                nodesList.forEach(function(node) {
+                    if (node.log) {
+                        logParts.push('--- [' + node.name + '] (JobID: ' + node.job_id + ', Exit: ' + node.exit_value + ') ---\\n' + node.log);
+                    } else if (node.status !== '待機中' && node.status !== '保留中') {
+                        logParts.push('--- [' + node.name + '] (JobID: ' + node.job_id + ', Status: ' + node.status + ') ---\\n(ログ出力はありません)\\n');
+                    }
+                });
+                const combinedLog = logParts.join('\\n\\n');
+                html += '<div id="session_log_area">';
+                html += '<h5 style="margin:5px 0;">統合実行ログ:</h5>';
+                html += '<textarea readonly rows="12" id="combined_log_textarea" style="width:100%; font-family:monospace; font-size:11px; background:#fafafa; height: calc(100vh - 460px); min-height: 250px;">' + combinedLog + '</textarea>';
+                html += '</div>';
+                wrapper.innerHTML = html;
+                const textarea = document.getElementById('combined_log_textarea');
+                if (textarea) {
+                    textarea.scrollTop = textarea.scrollHeight;
+                }
+                if (s.status === '実行中') {
+                    if (!activeLiveLogInterval) {
+                        activeLiveLogInterval = setInterval(function() {
+                            loadSessionDetail(sessionId);
+                        }, 2000);
+                    }
+                } else {
+                    if (activeLiveLogInterval) {
+                        clearInterval(activeLiveLogInterval);
+                        activeLiveLogInterval = null;
+                    }
+                }
+            });
+        }
+        // 個別スクリプトノードのログロード表示
+        function loadNodeLog(sessionId, jobId) {
+            fetch('/?api=session_detail&session_id=' + sessionId)
+            .then(function(res) { return res.json(); })
+            .then(function(s) {
+                const node = s.nodes[jobId];
+                if (!node) return;
+                const logArea = document.getElementById('session_log_area');
+                if (!logArea) return;
+                let html = '<h5 style="margin:5px 0; display:flex; justify-content:space-between; align-items:center;">';
+                html += '<span>ログ: ' + node.name + ' (終了コード: ' + node.exit_value + ')</span>';
+                html += '<a href="javascript:void(0);" onclick="loadSessionDetail(\'' + sessionId + '\')" style="font-size:10px; text-decoration:underline;">⬅️ 統合ログへ戻る</a>';
+                html += '</h5>';
+                html += '<textarea readonly rows="12" style="width:100%; font-family:monospace; font-size:11px; background:#fafafa; height: calc(100vh - 460px); min-height: 250px;">' + (node.log || '(ログ出力はありません)') + '</textarea>';
+                logArea.innerHTML = html;
+            });
+        }
+        // PJAX (リロードなしのSPA遷移) の実装
+        function navigateTo(url) {
+            if (activeLiveLogInterval) { clearInterval(activeLiveLogInterval); activeLiveLogInterval = null; }
+            if (activeHistoryInterval) { clearInterval(activeHistoryInterval); activeHistoryInterval = null; }
+            history.pushState(null, "", url);
+            
+            fetch(url)
+            .then(function(res) { return res.text(); })
+            .then(function(html) {
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(html, 'text/html');
+                
+                document.body.innerHTML = doc.body.innerHTML;
+                reinitPage();
+            })
+            .catch(function(err) {
+                window.location.href = url;
+            });
+        }
+        function reinitPage() {
+            const savedLang = localStorage.getItem('lang') || 'ja';
+            applyLanguage(savedLang);
             formatHistoryDates();
+            
+            const savedTheme = localStorage.getItem('theme') || 'light';
+            document.documentElement.setAttribute('data-theme', savedTheme);
+            updateThemeButtonLabel(savedTheme);
+            
+            if (typeof updateScheduleForm === 'function') updateScheduleForm();
+            if (typeof toggleNewScriptFields === 'function') toggleNewScriptFields();
+            if (typeof toggleTargetField === 'function') toggleTargetField();
+            const tabParam = new URLSearchParams(window.location.search).get('tab') || 'schedules';
+            if (tabParam === 'jobs') {
+                activeHistoryInterval = setInterval(refreshHistoryPane, 20000);
+            }
+        }
+        // グローバルなリンククリックのフック (Pjax化)
+        document.addEventListener('click', function(event) {
+            const link = event.target.closest('a');
+            if (!link) return;
+            
+            const href = link.getAttribute('href');
+            if (href && href.startsWith('/') && !link.classList.contains('refresh-icon') && link.getAttribute('target') !== '_blank') {
+                event.preventDefault();
+                navigateTo(href);
+            }
+        });
+        // ブラウザの戻る・進むボタン対策
+        window.addEventListener('popstate', function() {
+            navigateTo(window.location.href);
+        });
+        // 起動時の初期化フック
+        window.addEventListener('DOMContentLoaded', function() {
+            const tabParam = new URLSearchParams(window.location.search).get('tab') || 'schedules';
+            if (tabParam === 'jobs') {
+                activeHistoryInterval = setInterval(refreshHistoryPane, 20000);
+            }
+        });
+        formatHistoryDates();
         });
     </script>
 </head>
@@ -2262,7 +2600,6 @@ const htmlTemplate = `<!DOCTYPE html>
                     <tr><td># 名前</td><td># 任意のコメント</td><td>右端のコメントがスケジュール名になります</td></tr>
                 </tbody>
             </table>
-
             <h4 style="margin: 10px 0 5px 0; border-bottom: 1px solid var(--border-color); padding-bottom: 3px;" data-i18n="cron_help_examples_title">■ 具体的な記述例</h4>
             <ul style="margin: 0 0 10px 0; padding-left: 20px; list-style-type: square;">
                 <li><strong>毎分実行:</strong><br><code style="background: var(--card-bg); padding: 1px 3px;">* * * * * job_1783129031097696600 # 毎分タスク</code></li>
@@ -2270,7 +2607,6 @@ const htmlTemplate = `<!DOCTYPE html>
                 <li style="margin-top: 4px;"><strong>毎日深夜3時に実行:</strong><br><code style="background: var(--card-bg); padding: 1px 3px;">0 3 * * * job_1783129031097696600 # 日次バックアップ</code></li>
                 <li style="margin-top: 4px;"><strong>毎週月曜の朝9時に実行:</strong><br><code style="background: var(--card-bg); padding: 1px 3px;">0 9 * * 1 job_1783129031097696600 # 週次処理</code></li>
             </ul>
-
             <h4 style="margin: 10px 0 5px 0; border-bottom: 1px solid var(--border-color); padding-bottom: 3px;" data-i18n="cron_help_disable_title">■ スケジュールの無効化と削除</h4>
             <p style="margin: 0;" data-i18n="cron_help_disable_desc">
                 * 行の先頭に <strong><code>#</code></strong> を付けると、削除されずに<strong>「無効化」</strong>（グレーバッジ表示）として保持されます。<br>
@@ -2282,9 +2618,7 @@ const htmlTemplate = `<!DOCTYPE html>
         </div>
     </div>
 </div>
-
 <body>
-
 <div class="toolbar" style="justify-content: space-between;">
     <div style="display: flex; gap: 5px; align-items: center;">
         <a href="/?tab=jobs" class="tool-btn {{if or (eq .CurrentTab "jobs") (eq .CurrentTab "history") (eq .CurrentTab "schedules") (eq .CurrentTab "script_edit") (eq .CurrentTab "job_new") (eq .CurrentTab "job_edit")}}tool-active{{end}}"><span data-i18n="jobs_manage">📋 ジョブ管理</span></a>
@@ -2296,7 +2630,6 @@ const htmlTemplate = `<!DOCTYPE html>
         <button onclick="toggleDarkMode()" class="btn" style="font-size: 11px; padding: 2px 8px; font-weight: bold; background: var(--panel-bg); color: var(--text-color); cursor: pointer;" id="theme_btn">🌓 Dark Mode</button>
     </div>
 </div>
-
 <div class="container">
     {{if or (eq .CurrentTab "jobs") (eq .CurrentTab "history") (eq .CurrentTab "schedules") (eq .CurrentTab "script_edit") (eq .CurrentTab "job_new") (eq .CurrentTab "job_edit") (eq .CurrentTab "jobs_manage")}}
         <!-- ジョブ管理 統合画面 (横4列等間隔レイアウト) -->
@@ -2314,14 +2647,12 @@ const htmlTemplate = `<!DOCTYPE html>
                             <a href="/?tab=job_new&type=job" class="btn btn-primary" style="flex:1; text-align:center;"><span data-i18n="btn_create_job">＋ ジョブ作成</span></a>
                             <a href="/?tab=job_new&type=unit" class="btn" style="flex:1; text-align:center;"><span data-i18n="btn_create_unit">＋ ユニット作成</span></a>
                         </div>
-                        {{range .JobTree}}<div class="tree-node {{if eq .Node.ID $.SelectedJobID}}tree-active{{end}}">{{.Prefix}}{{if eq .Node.Type "unit"}}🏢{{else if eq .Node.Type "net"}}📂{{else}}📄{{end}} <a href="/?tab=jobs&s={{.Node.ID}}" class="tree-link">{{.Node.Name}}</a></div>{{else}}<div>ジョブが登録されていません。</div>{{end}}
-
+                        {{range .JobTree}}<div class="tree-node {{if eq .Node.ID $.SelectedJobID}}tree-active{{end}}">{{.Prefix}}{{if eq .Node.Type "unit"}}🏢{{else if eq .Node.Type "net"}}📂{{else}}📄{{end}} <a href="javascript:void(0);" onclick="showNodeDetail('{{.Node.ID}}', this)" class="tree-link">{{.Node.Name}}</a></div>{{else}}<div>ジョブが登録されていません。</div>{{end}}
                         <h4 style="margin-top:20px; border-bottom:1px solid #ccc; padding-bottom:3px;"><span data-i18n="real_script_list">📁 実スクリプトファイル一覧</span></h4>
                         <div class="tree-node">📁 scripts</div>
                         {{range .ScriptFiles}}<div class="tree-node">{{.Prefix}}📝 <a href="/?tab=script_edit&file={{.Path}}" class="tree-link">{{if .IsEnabled}}{{.Name}}{{else}}<span style="text-decoration: line-through; color: #888;">{{.Name}} (無効化中)</span>{{end}}</a></div>{{else}}<div class="tree-node">   └─ scripts/ フォルダにファイルがありません。</div>{{end}}
                     </div>
                 </div>
-
                 <!-- 下段：ジョブ詳細 / 新規 / 編集 / スクリプト編集 -->
                 <div class="pane-sub-section" style="flex: 1; min-height: 100px; border: 1px solid var(--border-color); background: var(--panel-bg); display: flex; flex-direction: column; height: 100%; overflow-y: auto;">
                     {{if eq .CurrentTab "job_new"}}
@@ -2337,10 +2668,8 @@ const htmlTemplate = `<!DOCTYPE html>
                                 <input type="hidden" name="action" value="create_job">
                                 <input type="hidden" name="type" value="{{.NewNodeType}}">
                                 <input type="hidden" name="parent_id" value="{{.ParentID}}">
-
                                 <label>名前:</label>
                                 <input type="text" name="name" required placeholder="例: バックアップ処理" style="width:100%; box-sizing:border-box;">
-
                                 {{if eq .NewNodeType "job"}}
                                     <label style="margin-top:5px; display:block;">実行スクリプトファイル:</label>
                                     <select name="script_select" id="script_select" onchange="toggleNewScriptFields()" style="width:100%;">
@@ -2351,7 +2680,6 @@ const htmlTemplate = `<!DOCTYPE html>
                                             {{end}}
                                         {{end}}
                                     </select>
-
                                     <div id="new_script_fields">
                                         <label style="margin-top:5px; display:block;">新規ファイル名 (拡張子含む):</label>
                                         <input type="text" name="new_filename" id="new_filename" placeholder="例: backup.sh" style="width:100%; box-sizing:border-box;">
@@ -2360,7 +2688,6 @@ const htmlTemplate = `<!DOCTYPE html>
                                         <textarea name="new_file_content" id="new_file_content" rows="4" style="width:100%; font-family:monospace; box-sizing:border-box;" placeholder="#!/bin/bash&#10;echo 'hello'"></textarea>
                                     </div>
                                 {{end}}
-
                                 <button type="submit" style="margin-top:10px; width:100%;">➕ 作成</button>
                             </form>
                         </div>
@@ -2376,10 +2703,8 @@ const htmlTemplate = `<!DOCTYPE html>
                             <form action="/action" method="POST">
                                 <input type="hidden" name="action" value="update_job">
                                 <input type="hidden" name="id" value="{{.SelectedNode.ID}}">
-
                                 <label>名前:</label>
                                 <input type="text" name="name" value="{{.SelectedNode.Name}}" required style="width:100%; box-sizing:border-box;">
-
                                 {{if eq .SelectedNode.Type "job"}}
                                     <label style="margin-top:5px; display:block;">実行コマンド (スクリプトパス):</label>
                                     <input type="text" name="command" value="{{.SelectedNode.Command}}" style="width:100%; box-sizing:border-box;">
@@ -2387,10 +2712,8 @@ const htmlTemplate = `<!DOCTYPE html>
                                     <label style="margin-top:5px; display:block;">実行時の引数:</label>
                                     <input type="text" name="run_user" value="{{.SelectedNode.RunUser}}" style="width:100%; box-sizing:border-box;">
                                 {{end}}
-
                                 <label style="margin-top:5px; display:block;">先行ジョブ条件 (JobIDカンマ区切り):</label>
                                 <input type="text" name="wait_conditions" value="{{.SelectedNodeWaitConditionsText}}" placeholder="例: job_123, job_456" style="width:100%; box-sizing:border-box;">
-
                                 <label style="margin-top:5px; display:block;">正常終了時の通知:</label>
                                 <select name="notify_normal" style="width:100%;">
                                     <option value="default" {{if eq .SelectedNode.NotifyNormal "default"}}selected{{end}}>グローバル設定に従う</option>
@@ -2399,7 +2722,6 @@ const htmlTemplate = `<!DOCTYPE html>
                                     <option value="slack" {{if eq .SelectedNode.NotifyNormal "slack"}}selected{{end}}>Slackのみ</option>
                                     <option value="email" {{if eq .SelectedNode.NotifyNormal "email"}}selected{{end}}>メールのみ</option>
                                 </select>
-
                                 <button type="submit" style="margin-top:10px; width:100%;">💾 保存</button>
                             </form>
                         </div>
@@ -2420,16 +2742,13 @@ const htmlTemplate = `<!DOCTYPE html>
                                      <span style="font-weight: bold; font-size: 11px; white-space: nowrap;" data-i18n="script_path_lbl">スクリプトパス:</span>
                                      <input type="text" value="{{.SelectedJobID}}" readonly style="background:#e0e0e0; cursor:not-allowed; flex: 1; font-size: 11px; padding: 2px;">
                                  </div>
-
                                  <label style="margin-top:2px; margin-bottom:2px; font-size:11px; font-weight: bold;" data-i18n="script_body_lbl">スクリプト本文 (Git連携):</label>
                                  <textarea name="script_content" rows="6" style="width:100%; height: 110px; font-family: monospace; font-size: 11px; box-sizing: border-box;">{{.ScriptContent}}</textarea>
-
                                  <div style="margin-top:4px; display: flex; gap: 5px; align-items: center;">
                                      <button type="submit" style="padding: 2px 8px; font-size: 11px;">💾 ファイル保存</button>
                                      <a href="/?tab=jobs" class="btn" style="padding: 2px 8px; font-size: 11px;">キャンセル</a>
                                  </div>
                             </form>
-
                             <div style="margin-top: 8px; border-top: 1px dashed #ccc; padding-top: 6px; display: flex; gap: 10px; align-items: flex-start;">
                                 <div style="flex: 1;">
                                     <form action="/action" method="POST" style="margin: 0;">
@@ -2447,9 +2766,10 @@ const htmlTemplate = `<!DOCTYPE html>
                                     {{if .SelectedNode}}
                                         <strong>{{.SelectedNode.Name}}</strong>
                                         <div style="display: flex; gap: 3px; align-items: center; margin-top: 2px;">
-                                            <form action="/action" method="POST" style="margin:0;">
+                                            <form action="/action" method="POST" style="margin:0; display:flex; gap:3px; align-items:center;">
                                                 <input type="hidden" name="action" value="run_job">
                                                 <input type="hidden" name="id" value="{{.SelectedNode.ID}}">
+                                                <input type="text" name="args" placeholder="引数を指定 (任意)" style="font-size: 9px; padding: 1px 3px; width: 80px; height: 16px;">
                                                 <button type="submit" style="font-size: 10px; padding: 1px 4px;">⚡ 実行</button>
                                             </form>
                                             <a href="/?tab=jobs&s={{.SelectedNode.ID}}" class="btn" style="font-size: 10px; padding: 1px 4px;">表示</a>
@@ -2462,7 +2782,7 @@ const htmlTemplate = `<!DOCTYPE html>
                         </div>
                     {{else}}
                         <div class="view-title"><span data-i18n="job_def_detail">ジョブ定義[詳細]</span></div>
-                        <div class="view-content" style="padding: 10px;">
+                        <div class="view-content" id="detail_pane_wrapper" style="padding: 10px;">
                             {{if .SelectedNode}}
                                 <h3>{{.SelectedNode.Name}}</h3>
                                 <table border="1" cellspacing="0" cellpadding="4" style="font-size: 12px; width: 100%;">
@@ -2486,13 +2806,13 @@ const htmlTemplate = `<!DOCTYPE html>
                                         {{if eq .SelectedNode.NotifyNormal "default"}}デフォルト設定に従う{{else if eq .SelectedNode.NotifyNormal "none"}}例外: 通知しない{{else if eq .SelectedNode.NotifyNormal "both"}}例外: メール & Slack 両方{{else if eq .SelectedNode.NotifyNormal "slack"}}例外: Slack のみ{{else if eq .SelectedNode.NotifyNormal "email"}}例外: メール のみ{{else}}デフォルト設定に従う{{end}}
                                     </td></tr>
                                 </table>
-
                                 <div style="margin-top: 15px; display: flex; gap: 5px; flex-wrap: wrap;">
                                     {{if or (eq .SelectedNode.Type "unit") (and (eq .SelectedNode.Type "job") .SelectedNode.Command)}}
-                                        <form action="/action" method="POST" style="margin:0;">
+                                        <form action="/action" method="POST" style="margin:0; display:flex; gap:5px; align-items:center;">
                                             <input type="hidden" name="action" value="run_job">
                                             <input type="hidden" name="id" value="{{.SelectedNode.ID}}">
-                                            <button type="submit">⚡ ジョブの実行</button>
+                                            <input type="text" name="args" placeholder="実行引数を指定 (任意)" style="font-size: 11px; padding: 2px; width: 140px; box-sizing: border-box;">
+                                            <button type="submit" class="btn btn-primary" style="padding: 2px 8px; font-size: 12px;">⚡ スクリプトの実行</button>
                                         </form>
                                     {{end}}
                                     <a href="/?tab=job_edit&id={{.SelectedNode.ID}}" class="btn">✏️ 変更 / スクリプト編集</a>
@@ -2513,12 +2833,11 @@ const htmlTemplate = `<!DOCTYPE html>
                     {{end}}
                 </div>
             </div>
-
             <!-- 2. ジョブ履歴カラム (等幅) -->
             <div class="pane-column" style="flex: 1; height: 100%; overflow-y: auto;">
                  <div class="view-title">
                      <span data-i18n="job_history">📊 ジョブ履歴</span>
-                     <a href="/?tab=jobs" class="refresh-icon"><span data-i18n="btn_update">🔄 更新</span></a>
+                     <a href="javascript:void(0);" onclick="refreshHistoryPane()" class="refresh-icon"><span data-i18n="btn_update">🔄 更新</span></a>
                  </div>
                  <div class="view-content" style="padding: 10px;">
                      <form action="/" method="GET" style="display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px; font-size:12px;">
@@ -2531,46 +2850,42 @@ const htmlTemplate = `<!DOCTYPE html>
                          <button type="submit" style="padding:2px 8px; font-size:12px;">検索</button>
                          <a href="/?tab=jobs" style="padding:2px; font-size:12px;"><span data-i18n="btn_clear">クリア</span></a>
                      </form>
-
-                     <table class="history-table" border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:11px; table-layout: fixed; word-break: break-all;">
-                         <colgroup>
-                             <col style="width: 35%;">
-                             <col style="width: 25%;">
-                             <col style="width: 25%;">
-                             <col style="width: 15%;">
-                         </colgroup>
-                         <thead>
-                              <tr>
-                                  <th>実行対象ユニット/ジョブ</th>
-                                  <th>開始日時</th>
-                                  <th>終了日時</th>
-                                  <th data-i18n="hist_header_result">実行結果</th>
-                              </tr>
-                         </thead>
-                         <tbody>
-                             {{range .Sessions}}
-                                 <tr class="{{if eq .SessionID $.SelectedSessionID}}tree-active{{end}}">
-                                     <td>{{.UnitName}}</td>
-                                     <td><a href="/?tab={{$.CurrentTab}}&session_id={{.SessionID}}{{if $.SelectedJobID}}&s={{$.SelectedJobID}}{{end}}">{{.StartDate}}</a></td>
+                      <table class="history-table" border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:11px; table-layout: fixed; word-break: break-all;">
+                          <colgroup>
+                              <col style="width: 25%;">
+                              <col style="width: 25%;">
+                              <col style="width: 15%;">
+                              <col style="width: 35%;">
+                          </colgroup>
+                          <thead>
+                               <tr>
+                                   <th>開始日時</th>
+                                   <th>終了日時</th>
+                                   <th data-i18n="hist_header_result">実行結果</th>
+                                   <th>実行対象</th>
+                               </tr>
+                          </thead>
+                          <tbody id="history_tbody">
+                              {{range .Sessions}}
+                                  <tr class="{{if eq .SessionID $.SelectedSessionID}}tree-active{{end}}">
+                                      <td><a href="javascript:void(0);" onclick="loadSessionDetail('{{.SessionID}}')">{{.StartDate}}</a></td>
                                       <td>{{.EndDate}}</td>
-                                     <td>
-                                         {{if eq .Status "正常終了"}}<span class="badge status-success">正常終了</span>
-                                         {{else if eq .Status "異常終了"}}<span class="badge status-error">異常終了</span>
-                                         {{else if eq .Status "警告終了"}}<span class="badge status-hold">警告終了</span>
-                                         {{else}}<span class="badge status-run">実行中</span>{{end}}
-                                     </td>
-                                 </tr>
-                             {{else}}
-                                 <tr><td colspan="4">履歴がありません。</td></tr>
+                                      <td>
+                                          {{if eq .Status "正常終了"}}<span class="badge status-success">正常終了</span>
+                                          {{else if eq .Status "異常終了"}}<span class="badge status-error">異常終了</span>
+                                          {{else if eq .Status "警告終了"}}<span class="badge status-hold">警告終了</span>
+                                          {{else}}<span class="badge status-run">実行中</span>{{end}}
+                                      </td>
+                                      <td>{{.UnitName}}</td>
+                                  </tr>
                              {{end}}
                          </tbody>
                      </table>
                  </div>
             </div>
-
             <!-- 3. セッション詳細カラム (等幅) -->
-            <div class="pane-column" style="flex: 1; height: 100%; overflow-y: auto;">
-                 <div class="view-content" style="padding: 10px;">
+            <div class="pane-column" id="session_detail_column" style="flex: 1; height: 100%; overflow-y: auto;">
+                 <div class="view-content" id="session_detail_wrapper" style="padding: 10px;">
                      {{if .SelectedSession}}
                          <div class="view-title" style="margin: -10px -10px 10px -10px;"><span><span data-i18n="session_detail">セッション詳細</span>: {{.SelectedSessionID}}</span></div>
                          <div style="font-size:12px; margin-bottom:10px;">
@@ -2581,9 +2896,7 @@ const htmlTemplate = `<!DOCTYPE html>
                              {{else}}<span class="badge status-run">実行中</span>{{end}}
                              (正常: {{.GreenCount}} / 警告: {{.YellowCount}} / 異常: {{.RedCount}} / 合計: {{.TotalCount}})
                          </div>
-
                          <div class="topology-map" style="padding:10px; font-size:11px; margin-bottom:10px; max-height:120px; overflow-y:auto; white-space: normal;">{{range .SessionNodes}}<span class="topo-node {{if eq .Node.Status "実行中"}}flow-node-run{{else if eq .Node.Status "未実施"}}flow-node-unknown{{else if eq .Node.Status "起動失敗"}}flow-node-error{{else if eq .StatusLabel "正常終了"}}flow-node-success{{else if eq .StatusLabel "警告終了"}}flow-node-warn{{else if eq .StatusLabel "異常終了"}}flow-node-error{{else}}flow-node-success{{end}}"><a href="/?tab={{$.CurrentTab}}&session_id={{$.SelectedSessionID}}&show_log={{.Node.JobID}}{{if $.SelectedJobID}}&s={{$.SelectedJobID}}{{end}}" style="color:inherit;">{{.Node.Name}} [{{if eq .Node.Status "終了"}}{{.StatusLabel}}{{else}}{{.Node.Status}}{{end}}]</a></span><span class="flow-arrow"> → </span>{{end}}<span>完了</span></div>
-
                          {{if .ShowLogNode}}
                              <h5 style="margin:5px 0;">ログ: {{.ShowLogNode.Name}} (終了コード: {{.ShowLogNode.ExitValue}})</h5>
                              <textarea readonly rows="6" style="width:100%; font-family:monospace; font-size:11px; background:#fafafa;">{{.ShowLogNode.Log}}</textarea>
@@ -2598,14 +2911,13 @@ const htmlTemplate = `<!DOCTYPE html>
                      {{end}}
                  </div>
             </div>
-
             <!-- 4. スケジュールカラム (上スケジュール一覧 & 下スケジュール追加) -->
             <div class="pane-column" style="flex: 1; display: flex; flex-direction: column; gap: 5px; height: 100%; border: none; background: transparent;">
                 <!-- 上段：スケジュール一覧 -->
                 <div class="pane-sub-section" style="flex: 1.5; min-height: 100px; border: 1px solid var(--border-color); background: var(--panel-bg); display: flex; flex-direction: column; height: 100%; overflow-y: auto;">
                      <div class="view-title">
                          <span data-i18n="schedule_list">📅 スケジュール一覧</span>
-                         <a href="/?tab=jobs" class="refresh-icon"><span data-i18n="btn_update">🔄 更新</span></a>
+                         <a href="javascript:void(0);" onclick="refreshHistoryPane()" class="refresh-icon"><span data-i18n="btn_update">🔄 更新</span></a>
                      </div>
                      <div class="view-content" style="padding: 10px;">
                           <table class="schedule-table" border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:11px; table-layout: fixed; word-break: break-all;">
@@ -2664,7 +2976,6 @@ const htmlTemplate = `<!DOCTYPE html>
                                  {{end}}
                              </tbody>
                          </table>
-
                          <div style="display: flex; justify-content: space-between; align-items: center; margin-top:15px; margin-bottom:5px;">
                              <h5 style="margin:0;" data-i18n="schedule_bulk_title">📝 スケジュール一括登録・編集 (crontab -e 互換)</h5>
                              <button type="button" onclick="showCronHelpModal()" class="btn" style="font-size: 10px; padding: 1px 6px; display: inline-flex; align-items: center; gap: 2px;">❓ <span data-i18n="btn_help">ヘルプ</span></button>
@@ -2676,7 +2987,6 @@ const htmlTemplate = `<!DOCTYPE html>
                          </form>
                      </div>
                 </div>
-
                 <!-- 下段：スケジュール追加 -->
                 <div class="pane-sub-section" style="flex: 1; min-height: 100px; border: 1px solid var(--border-color); background: var(--panel-bg); display: flex; flex-direction: column; height: 100%; overflow-y: auto;">
                      <div class="view-title"><span data-i18n="schedule_add">➕ スケジュール追加</span></div>
@@ -2686,14 +2996,12 @@ const htmlTemplate = `<!DOCTYPE html>
                               
                               <label data-i18n="lbl_schedule_name">スケジュール名:</label>
                               <input type="text" name="name" required placeholder="例: 夜間バックアップ" style="width:100%; font-size:12px; padding:2px; box-sizing:border-box;">
-
                               <label style="margin-top:3px;" data-i18n="lbl_target_job">実行対象ジョブ:</label>
                               <select name="job_id" required style="width:100%; font-size:12px; padding:2px;">
                                   {{range .Jobs}}
                                       <option value="{{.ID}}">{{.Name}}</option>
                                   {{end}}
                               </select>
-
                               <label style="margin-top:3px;" data-i18n="lbl_setting_type">設定タイプ:</label>
                               <div class="schedule-type-grid" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; font-size: 11px;">
                                   <label><input type="radio" name="type" value="cron" checked onclick="toggleScheduleFields('cron')"> crontab</label>
@@ -2703,25 +3011,23 @@ const htmlTemplate = `<!DOCTYPE html>
                                   <label><input type="radio" name="type" value="interval" onclick="toggleScheduleFields('interval')"> 一定間隔</label>
                                   <label><input type="radio" name="type" value="date" onclick="toggleScheduleFields('date')"> 日時指定</label>
                               </div>
-
                               <label style="margin-top:3px;" data-i18n="lbl_target_date">日付 (日時指定用):</label>
                               <input type="date" name="run_date" id="input_run_date" style="width:100%; font-size:12px; padding:2px; box-sizing:border-box;">
-
                               <label style="margin-top:3px;" data-i18n="lbl_cron_expr">crontab設定 (例: <code>*/15 * * * *</code>):</label>
                               <input type="text" name="cron_expr" id="input_cron_expr" placeholder="*/15 * * * *" style="width:100%; font-size:12px; padding:2px; box-sizing:border-box;">
-
                               <label style="margin-top:3px;" data-i18n="lbl_weekday">曜日 (毎週用, 0=日, 1=月, ...):</label>
                               <input type="text" name="weekday" id="input_weekday" value="*" style="width:100%; font-size:12px; padding:2px; box-sizing:border-box;">
-
                               <label style="margin-top:3px;" data-i18n="lbl_start_time">開始時刻 (hh:mm):</label>
                               <div style="display: flex; gap: 5px; align-items: center;">
                                   <input type="text" name="hour" id="input_hour" placeholder="hh" value="18" style="width: 40px; font-size:12px; padding:2px;"> : 
                                   <input type="text" name="minute" id="input_minute" placeholder="mm" value="00" style="width: 40px; font-size:12px; padding:2px;">
                               </div>
-
                               <label style="margin-top:3px;" data-i18n="lbl_interval">間隔時間 (毎時/一定間隔用・分):</label>
                               <input type="text" name="interval" id="input_interval" placeholder="15" style="width:100%; font-size:12px; padding:2px; box-sizing:border-box;">
-
+                              <label style="margin-top:3px;" data-i18n="lbl_job_args">引数 (任意):</label>
+                              <input type="text" name="args" placeholder="例: arg1 arg2" style="width:100%; font-size:12px; padding:2px; box-sizing:border-box;">
+                              <label style="margin-top:3px;" data-i18n="lbl_job_args">引数 (任意):</label>
+                              <input type="text" name="args" placeholder="例: arg1 arg2" style="width:100%; font-size:12px; padding:2px; box-sizing:border-box;">
                               <button type="submit" style="margin-top:8px; width:100%; padding:4px;" class="btn btn-primary"><span data-i18n="btn_register">➕ 登録</span></button>
                           </form>
                      </div>
@@ -2745,10 +3051,9 @@ const htmlTemplate = `<!DOCTYPE html>
                          <a href="/?tab={{$.CurrentTab}}&filter=normal&sort={{$.SortKey}}&order={{$.SortOrder}}" class="btn {{if eq $.FilterStatus "normal"}}btn-success{{end}}" style="font-size:10px; padding:2px 6px; {{if ne $.FilterStatus "normal"}}background:#f5fff5; color:#00aa00; border-color:#99cc99;{{end}}"><span data-i18n="filter_normal">🟢 正常のみ</span></a>
                          <a href="/?tab={{$.CurrentTab}}&filter=unknown&sort={{$.SortKey}}&order={{$.SortOrder}}" class="btn {{if eq $.FilterStatus "unknown"}}btn-primary{{end}}" style="font-size:10px; padding:2px 6px; {{if ne $.FilterStatus "unknown"}}background:#f5f5f5; color:#555; border-color:#ccc;{{end}}"><span data-i18n="filter_unknown">⚪ 未判定のみ</span></a>
                      </div>
-
                      <table class="history-table" border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:11px; table-layout: fixed; word-break: break-all;">
                          <colgroup>
-                             <col style="width: 35%;">
+                             <col style="width: 25%;">
                              <col style="width: 25%;">
                              <col style="width: 25%;">
                              <col style="width: 15%;">
@@ -2776,7 +3081,6 @@ const htmlTemplate = `<!DOCTYPE html>
                              {{end}}
                          </tbody>
                      </table>
-
                      <h4 style="margin-top:20px;">📝 ノード一括登録・編集 (CSV形式)</h4>
                      <form action="/action" method="POST">
                          <input type="hidden" name="action" value="save_nodes_bulk">
@@ -2785,7 +3089,6 @@ const htmlTemplate = `<!DOCTYPE html>
                              <button type="submit" class="btn btn-primary" style="font-size:12px; padding:3px 10px;">💾 ノード一括保存 (適用)</button>
                          </div>
                      </form>
-
                      <div style="margin-top: 15px; border-top: 1px dashed #ccc; padding-top: 10px; display: flex; gap: 5px;">
                          <form action="/action" method="POST" style="margin:0; flex:1;" onsubmit="return confirm('「異常」状態のノードをすべて削除しますか？');">
                              <input type="hidden" name="action" value="delete_nodes_by_status">
@@ -2804,7 +3107,6 @@ const htmlTemplate = `<!DOCTYPE html>
                          </form>
                      </div>
                  </div>
-
                  <div style="flex: 1; padding: 10px; height: 100%; box-sizing: border-box; overflow-y: auto; font-size:12px;">
                      {{if .SelectedNodeData}}
                          <div class="view-title" style="margin: -10px -10px 10px -10px;"><span>ノード詳細: {{.SelectedNodeData.Name}}</span></div>
@@ -2813,7 +3115,6 @@ const htmlTemplate = `<!DOCTYPE html>
                              <tr><th>プラットフォーム</th><td>{{.SelectedNodeData.Platform}}</td></tr>
                              <tr><th>説明</th><td>{{.SelectedNodeData.Description}}</td></tr>
                          </table>
-
                          <h5 style="margin:10px 0 5px 0;">このノードの監視設定</h5>
                          <table border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:11px;">
                              <thead>
@@ -2822,7 +3123,11 @@ const htmlTemplate = `<!DOCTYPE html>
                              <tbody>
                                  {{range .SelectedNodeMonitors}}
                                      <tr>
-                                         <td>{{.Type}} ({{.Target}})</td>
+                                         <td>
+                                         {{.Type}} ({{.Target}})<br>
+                                         {{if .OnErrorScript}}<span style="font-size:9px; color:#c00;">[🚨: {{.OnErrorScript}}{{if .OnErrorArgs}} ({{.OnErrorArgs}}){{end}}]</span><br>{{end}}
+                                         {{if .OnNormalScript}}<span style="font-size:9px; color:#080;">[✅: {{.OnNormalScript}}{{if .OnNormalArgs}} ({{.OnNormalArgs}}){{end}}]</span>{{end}}
+                                     </td>
                                          <td>{{.Operator}} {{.ThresholdValue}}</td>
                                          <td>
                                              {{if eq .LastStatus "正常"}}<span class="badge status-success">正常</span>
@@ -2835,7 +3140,6 @@ const htmlTemplate = `<!DOCTYPE html>
                                  {{end}}
                              </tbody>
                          </table>
-
                          <div style="margin-top:15px; display:flex; gap:5px;">
                              <form action="/action" method="POST" style="margin:0;">
                                  <input type="hidden" name="action" value="delete_node">
@@ -2851,25 +3155,20 @@ const htmlTemplate = `<!DOCTYPE html>
                              
                              <label style="margin-top:3px;">ノード名:</label>
                              <input type="text" name="name" required placeholder="例: DBサーバ" style="width:100%; font-size:12px; padding:2px;">
-
                              <label style="margin-top:5px;">IPアドレス:</label>
                              <input type="text" name="ip_address" required placeholder="例: 192.168.1.10" style="width:100%; font-size:12px; padding:2px;">
-
                              <label style="margin-top:5px;">プラットフォーム:</label>
                              <select name="platform" style="width:100%; font-size:12px; padding:2px;">
                                  <option value="linux">Linux</option>
                                  <option value="windows">Windows</option>
                              </select>
-
                              <label style="margin-top:5px;">説明:</label>
                              <input type="text" name="description" placeholder="用途など" style="width:100%; font-size:12px; padding:2px;">
-
                              <button type="submit" style="margin-top:10px; width:100%; padding:4px;"><span data-i18n="btn_register">➕ 登録</span></button>
                          </form>
                      {{end}}
                  </div>
             </div>
-
             <!-- 2. ノードマップセクション (グリッドレイアウトへ改善) -->
             <div class="split-section" style="min-height: 200px; padding:10px; height: 250px; overflow-y: auto; box-sizing: border-box;">
                  <div class="view-title" style="margin: -10px -10px 10px -10px;">
@@ -2889,7 +3188,6 @@ const htmlTemplate = `<!DOCTYPE html>
                      {{end}}
                  </div>
             </div>
-
             <!-- 3. 監視管理セクション -->
             <div class="split-section" style="flex: 1; min-height: 150px; display: flex; flex-direction: row; gap: 5px; box-sizing: border-box; overflow: hidden;">
                  <!-- A. 監視設定一覧 -->
@@ -2908,7 +3206,6 @@ const htmlTemplate = `<!DOCTYPE html>
                          <span class="badge status-unknown">不明: {{.BlueCount}}</span>
                          (合計: {{.TotalCount}} 件)
                      </div>
-
                      <table border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:12px; margin-bottom:15px;">
                          <thead>
                              <tr>
@@ -2926,7 +3223,11 @@ const htmlTemplate = `<!DOCTYPE html>
                                          {{$nodeObj := index $.NodeMap .NodeID}}
                                          {{if $nodeObj}}{{$nodeObj.Name}}{{else}}{{.NodeID}}{{end}}
                                      </td>
-                                     <td>{{.Type}} ({{.Target}})</td>
+                                     <td>
+                                         {{.Type}} ({{.Target}})<br>
+                                         {{if .OnErrorScript}}<span style="font-size:9px; color:#c00;">[🚨: {{.OnErrorScript}}{{if .OnErrorArgs}} ({{.OnErrorArgs}}){{end}}]</span><br>{{end}}
+                                         {{if .OnNormalScript}}<span style="font-size:9px; color:#080;">[✅: {{.OnNormalScript}}{{if .OnNormalArgs}} ({{.OnNormalArgs}}){{end}}]</span>{{end}}
+                                     </td>
                                      <td>{{.Operator}} {{.ThresholdValue}}</td>
                                      <td>
                                          {{if eq .LastStatus "正常"}}<span class="badge status-success">正常</span>
@@ -2946,9 +3247,7 @@ const htmlTemplate = `<!DOCTYPE html>
                              {{end}}
                          </tbody>
                      </table>
-
                      </div>
-
                  <!-- B. 監視アラート履歴 -->
                  <div style="flex: 1; padding: 10px; height: 100%; box-sizing: border-box; overflow-y: auto;">
                       <div class="view-title" style="margin: -10px -10px 10px -10px;">
@@ -2985,7 +3284,6 @@ const htmlTemplate = `<!DOCTYPE html>
                  </div>
             </div>
         </div>
-
     {{else if eq .CurrentTab "settings"}}
         <!-- 設定ペイン -->
         <div class="pane-full">
@@ -2997,7 +3295,6 @@ const htmlTemplate = `<!DOCTYPE html>
                 {{if .SuccessMessage}}
                     <div class="success-message" style="background:#ddffdd; color:#00aa00; border:1px solid #bbffbb; padding:10px; border-radius:4px; margin-bottom:15px; font-weight:bold; font-size:12px;">✅ {{.SuccessMessage}}</div>
                 {{end}}
-
                 <div style="background: var(--alert-bg); padding:15px; border:1px solid var(--border-color); margin-bottom:20px; color: var(--text-color);">
                     <h3 data-i18n="settings_en_de">💾 Himenos設定のインポート / エクスポート (YAML形式)</h3>
                     <div class="help-text" data-i18n="settings_en_de_help">すべての設定を一括バックアップ・復元できます。</div>
@@ -3010,10 +3307,8 @@ const htmlTemplate = `<!DOCTYPE html>
                         <button type="submit" style="margin-top:5px;" data-i18n="settings_import_btn">インポート実行</button>
                     </form>
                 </div>
-
                 <form action="/action" method="POST" style="margin: 0;">
                     <input type="hidden" name="action" id="settings_action_type" value="update_settings">
-
                     <!-- 1. 共通デフォルト設定カード -->
                     <div style="background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); margin-bottom: 20px; color: var(--text-color);">
                         <h3 style="margin-top: 0; display: flex; align-items: center; gap: 5px; color: var(--text-color);"><span style="font-size: 20px;">🔔</span> <span data-i18n="settings_notify_title">共通デフォルト通知設定</span></h3>
@@ -3028,7 +3323,6 @@ const htmlTemplate = `<!DOCTYPE html>
                         </div>
                         <div class="help-text" style="margin-top: 6px; color: var(--text-color); opacity: 0.8;"><span data-i18n="settings_notify_help">※ 個別ジョブや監視で「デフォルト設定に従う」を選択した際、この設定が適用されます。</span></div>
                     </div>
-
                     <!-- 2. 横並びの通知設定カードコンテナ -->
                     <div style="display: flex; gap: 20px; flex-wrap: wrap;">
                         
@@ -3046,7 +3340,6 @@ const htmlTemplate = `<!DOCTYPE html>
                                 <button type="submit" onclick="document.getElementById('settings_action_type').value='test_slack';" class="btn" style="flex: 1; background: #e8f0fe; color: #5495e8; border: 1px solid #d2e3fc; padding: 8px; font-weight: bold; border-radius: 4px; font-size: 12px; cursor: pointer; text-align: center; height: 32px; display: inline-flex; justify-content: center; align-items: center;">⚡ テスト送信</button>
                             </div>
                         </div>
-
                         <!-- SMTPメール設定カード -->
                         <div style="flex: 1.2; min-width: 380px; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); border-top: 4px solid #1a73e8; display: flex; flex-direction: column; justify-content: space-between; color: var(--text-color);">
                             <div>
@@ -3086,7 +3379,6 @@ const htmlTemplate = `<!DOCTYPE html>
                                 <button type="submit" onclick="document.getElementById('settings_action_type').value='test_email';" class="btn" style="flex: 1; background: #e8f0fe; color: #5495e8; border: 1px solid #d2e3fc; padding: 8px; font-weight: bold; border-radius: 4px; font-size: 12px; cursor: pointer; text-align: center; height: 32px; display: inline-flex; justify-content: center; align-items: center;">⚡ テスト送信</button>
                             </div>
                         </div>
-
                     </div>
                 
                     <!-- 3. セキュリティ設定（Basic認証 & IPアドレス制限） -->
@@ -3189,18 +3481,15 @@ const htmlTemplate = `<!DOCTYPE html>
                             
                         </div>
                     </div>
-
                 </form>
             </div>
         </div>
     {{end}}
 </div>
-
 <div class="status-bar">
     <span>接続先Himenosマネージャ(1/1)：ローカル(localhost)</span>
     <span>Himenos-Go v3.1 Web UI (w3m対応)</span>
 </div>
-
 <!-- 監視設定追加モーダルダイアログ -->
 <div id="add_monitor_modal" class="modal-overlay" onclick="if(event.target===this) hideAddMonitorModal();">
     <div class="modal-card">
@@ -3218,22 +3507,24 @@ const htmlTemplate = `<!DOCTYPE html>
                         <option value="{{.ID}}">{{.Name}} ({{.IPAddress}})</option>
                     {{end}}
                 </select>
-
                 <label style="font-weight: bold; color: var(--text-color);">監視項目タイプ:</label>
                 <select name="type" onchange="toggleTargetField()" style="width:100%; font-size:12px; padding:4px; border: 1px solid #d0d7de; border-radius: 4px; margin-bottom: 12px; background: #ffffff;">
                     <option value="ping">PING 応答監視 (死活監視)</option>
                     <option value="port">TCP ポート接続確認</option>
                 </select>
-
                 <label style="font-weight: bold; color: var(--text-color);">ターゲット (ポート番号など):</label>
-                <input type="text" name="target" placeholder="例: 80" style="width:100%; font-size:12px; padding:4px; border: 1px solid #d0d7de; border-radius: 4px; margin-bottom: 15px; box-sizing: border-box;">
-
+                <input type="text" name="target" placeholder="例: 80" style="width:100%; font-size:12px; padding:4px; border: 1px solid #d0d7de; border-radius: 4px; margin-bottom: 12px; box-sizing: border-box;">
+                <label style="font-weight: bold; color: var(--text-color);">🚨 異常検知時実行スクリプト (任意):</label>
+                <input type="text" name="on_error_script" placeholder="例: scripts/reboot.sh または job_xxx" style="width:100%; font-size:12px; padding:4px; border: 1px solid #d0d7de; border-radius: 4px; margin-bottom: 8px; box-sizing: border-box;">
+                <input type="text" name="on_error_args" placeholder="引数 (例: {{"{{NodeName}}"}} {{"{{NodeIP}}"}} {{"{{Status}}"}})" style="width:100%; font-size:11px; padding:4px; border: 1px solid #d0d7de; border-radius: 4px; margin-bottom: 12px; box-sizing: border-box;">
+                <label style="font-weight: bold; color: var(--text-color);">✅ 正常復帰時実行スクリプト (任意):</label>
+                <input type="text" name="on_normal_script" placeholder="例: scripts/notify.sh" style="width:100%; font-size:12px; padding:4px; border: 1px solid #d0d7de; border-radius: 4px; margin-bottom: 8px; box-sizing: border-box;">
+                <input type="text" name="on_normal_args" placeholder="引数 (例: {{"{{NodeName}}"}} {{"{{Status}}"}})" style="width:100%; font-size:11px; padding:4px; border: 1px solid #d0d7de; border-radius: 4px; margin-bottom: 15px; box-sizing: border-box;">
                 <button type="submit" class="btn btn-primary" style="width:100%; padding:6px; font-weight: bold; border-radius: 4px; cursor: pointer; text-align: center;"><span data-i18n="btn_register">➕ 登録</span></button>
             </form>
         </div>
     </div>
 </div>
-
 </body>
 </html>`
 
@@ -3241,14 +3532,12 @@ type TreeItem struct {
 	Node   *JobNode
 	Prefix string
 }
-
 type ScriptFileInfo struct {
 	Path      string
 	Name      string
 	IsEnabled bool
 	Prefix    string
 }
-
 type PageData struct {
 	HistoryStartDate      string
 	HistoryEndDate        string
@@ -3259,42 +3548,44 @@ type PageData struct {
 	TotalCount            int
 	ScriptFiles           []ScriptFileInfo
 	SelectedScriptEnabled bool
-	ScriptContent     string
-	SchedulesCronText string
-	HistoryKeyword    string
-	NodeCsvText       string
-	CurrentTime       string
-	CurrentTab        string
-	JobTree           []TreeItem
-	SelectedJobID     string
-	SelectedNode      *JobNode
-	WaitConditionsStr string
-	NewNodeType       string
-	ParentID          string
-	Schedules         []Schedule
-	UnitOptions       []*JobNode
-	Sessions          []*JobSession
-	SelectedSessionID string
-	SelectedSession   *JobSession
-	SessionNodes      []SessionNodeItem
-	ShowLogNode       *NodeState
-	CombinedLog       string
-	Settings          Settings
-	JobMap            map[string]*JobNode
-	ErrorMessage      string
-	SuccessMessage    string
-	Nodes             []*ManagedNode
-	SelectedNodeID    string
-	SelectedNodeData  *ManagedNode
-	NodeMonitors      []*MonitorSetting
-	SelectedNodeMonitors []*MonitorSetting
-	NodeMap           map[string]*ManagedNode
-	MonitorHistory    []MonitorHistory
-	SortKey           string
-	SortOrder         string
-	FilterStatus      string
+	ScriptContent         string
+	SchedulesCronText     string
+	HistoryKeyword        string
+	NodeCsvText           string
+	CurrentTime           string
+	CurrentTab            string
+	JobTree               []TreeItem
+	SelectedJobID         string
+	SelectedNode          *JobNode
+	WaitConditionsStr     string
+	NewNodeType           string
+	ParentID              string
+	Schedules             []Schedule
+	UnitOptions           []*JobNode
+	Sessions              []*JobSession
+	SelectedSessionID     string
+	SelectedSession       *JobSession
+	SessionNodes          []SessionNodeItem
+	ShowLogNode           *NodeState
+	CombinedLog           string
+	Settings              Settings
+	JobMap                map[string]*JobNode
+	ErrorMessage          string
+	SuccessMessage        string
+	Nodes                 []*ManagedNode
+	SelectedNodeID        string
+	SelectedNodeData      *ManagedNode
+	JobsJSON              string
+	SchedulesJSON         string
+	MonitorsJSON          string
+	NodeMonitors          []*MonitorSetting
+	SelectedNodeMonitors  []*MonitorSetting
+	NodeMap               map[string]*ManagedNode
+	MonitorHistory        []MonitorHistory
+	SortKey               string
+	SortOrder             string
+	FilterStatus          string
 }
-
 type SessionNodeItem struct {
 	Node        *NodeState
 	StatusLabel string
@@ -3311,9 +3602,6 @@ func ipToUint32(ipStr string) uint32 {
 	}
 	return binary.BigEndian.Uint32(ipv4)
 }
-
-
-
 func parseIP(remoteAddr string) string {
 	ip, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
@@ -3321,7 +3609,6 @@ func parseIP(remoteAddr string) string {
 	}
 	return ip
 }
-
 func checkIP(clientIP string, allowedIPs []string) bool {
 	if len(allowedIPs) == 0 {
 		return true
@@ -3348,13 +3635,11 @@ func checkIP(clientIP string, allowedIPs []string) bool {
 	}
 	return false
 }
-
 func basicAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		engine.mu.Lock()
 		settings := engine.settings
 		engine.mu.Unlock()
-
 		// 1. IPアドレス制限
 		if settings.IPRestrictionEnabled && len(settings.AllowedIPs) > 0 {
 			clientIP := parseIP(r.RemoteAddr)
@@ -3366,14 +3651,12 @@ func basicAuth(next http.HandlerFunc) http.HandlerFunc {
 				}
 			}
 		}
-
 		// 2. Basic認証
 		username, password, ok := r.BasicAuth()
 		users := settings.BasicAuthUsers
 		if len(users) == 0 {
 			users = []BasicAuthUser{{Username: "admin", Password: "himenos"}}
 		}
-
 		authenticated := false
 		if ok {
 			for _, user := range users {
@@ -3383,7 +3666,6 @@ func basicAuth(next http.HandlerFunc) http.HandlerFunc {
 				}
 			}
 		}
-
 		if !authenticated {
 			w.Header().Set("WWW-Authenticate", `Basic realm="Himenos System Login"`)
 			w.WriteHeader(http.StatusUnauthorized)
@@ -3393,37 +3675,70 @@ func basicAuth(next http.HandlerFunc) http.HandlerFunc {
 		next(w, r)
 	}
 }
-
-
 func main() {
-
 	initEngine()
 	StartScheduler()
 	engine.StartMonitoring()
-
 	tmpl := template.Must(template.New("index").Parse(htmlTemplate))
-
 	http.HandleFunc("/", basicAuth(func(w http.ResponseWriter, r *http.Request) {
+		// APIリクエストの場合はJSONを直接返す
+		apiType := r.URL.Query().Get("api")
+		if apiType != "" {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			switch apiType {
+			case "history":
+				var historyList []*JobSession
+				if db != nil {
+					rows, err := db.Query("SELECT data FROM session_history ORDER BY start_date DESC LIMIT 50")
+					if err == nil {
+						defer rows.Close()
+						for rows.Next() {
+							var dataStr string
+							if err := rows.Scan(&dataStr); err == nil {
+								var session JobSession
+								if err := json.Unmarshal([]byte(dataStr), &session); err == nil {
+									historyList = append(historyList, &session)
+								}
+							}
+						}
+					}
+				}
+				_ = json.NewEncoder(w).Encode(historyList)
+				return
+			case "session_detail":
+				sessionID := r.URL.Query().Get("session_id")
+				if db != nil {
+					var dataStr string
+					err := db.QueryRow("SELECT data FROM session_history WHERE session_id = ?", sessionID).Scan(&dataStr)
+					if err == nil {
+						var session JobSession
+						if err := json.Unmarshal([]byte(dataStr), &session); err == nil {
+							_ = json.NewEncoder(w).Encode(session)
+							return
+						}
+					}
+				}
+				http.Error(w, "Session not found", http.StatusNotFound)
+				return
+			}
+		}
 		tab := r.URL.Query().Get("tab")
 		if tab == "" {
 			tab = "schedules"
 		}
-
 		engine.mu.Lock()
 		defer engine.mu.Unlock()
-
 		data := PageData{
-			CurrentTime: time.Now().Format("2006-01-02 15:04:05"),
-			CurrentTab:  tab,
-			Settings:    engine.settings,
-			Schedules:   engine.schedules,
-			Sessions:    engine.sessions,
-			JobMap:      engine.jobs,
-			NodeMap:     engine.nodes,
-			ErrorMessage: r.URL.Query().Get("err"),
+			CurrentTime:    time.Now().Format("2006-01-02 15:04:05"),
+			CurrentTab:     tab,
+			Settings:       engine.settings,
+			Schedules:      engine.schedules,
+			Sessions:       engine.sessions,
+			JobMap:         engine.jobs,
+			NodeMap:        engine.nodes,
+			ErrorMessage:   r.URL.Query().Get("err"),
 			SuccessMessage: r.URL.Query().Get("msg"),
 		}
-
 		// scripts/ フォルダのスキャン
 		if files, err := os.ReadDir(scriptsDir); err == nil {
 			var tempFiles []os.DirEntry
@@ -3436,12 +3751,11 @@ func main() {
 				filePath := filepath.Join(scriptsDir, f.Name())
 				name := f.Name()
 				isEnabled := !strings.HasSuffix(name, ".disabled")
-				
+
 				prefix := "   ├─ "
 				if idx == len(tempFiles)-1 {
 					prefix = "   └─ "
 				}
-
 				data.ScriptFiles = append(data.ScriptFiles, ScriptFileInfo{
 					Path:      filePath,
 					Name:      name,
@@ -3450,7 +3764,6 @@ func main() {
 				})
 			}
 		}
-
 		// ジョブユニットツリーの構築 (w3m対応テキストツリー)
 		var buildTree func(id string, indent string, isLast bool)
 		buildTree = func(id string, indent string, isLast bool) {
@@ -3467,7 +3780,6 @@ func main() {
 				}
 			}
 			data.JobTree = append(data.JobTree, TreeItem{Node: n, Prefix: prefix})
-
 			nextIndent := indent
 			if indent != "" {
 				if isLast {
@@ -3478,12 +3790,10 @@ func main() {
 			} else {
 				nextIndent = " "
 			}
-
 			for i, childID := range n.Children {
 				buildTree(childID, nextIndent, i == len(n.Children)-1)
 			}
 		}
-
 		// 最上位（親なし）のユニットを探索
 		var rootUnits []string
 		for id, n := range engine.jobs {
@@ -3494,13 +3804,10 @@ func main() {
 		for _, rootID := range rootUnits {
 			buildTree(rootID, "", true)
 		}
-
 		// (ゴミ箱ノード構築処理は削除)
-
 		// ジョブ詳細
 		isJobTab := tab == "jobs" || tab == "job_edit" || tab == "job_new" || tab == "history" || tab == "schedules" || tab == "script_edit" || tab == "jobs_manage"
 		isNodeTab := tab == "nodes" || tab == "topology" || tab == "monitors" || tab == "nodes_manage" || tab == "node_new"
-
 		if isJobTab {
 			// 1. ジョブ設定データロード
 			selected := r.URL.Query().Get("s")
@@ -3510,7 +3817,6 @@ func main() {
 					data.SelectedNode = node
 				}
 			}
-
 			id := r.URL.Query().Get("id")
 			if id != "" {
 				if node, exists := engine.jobs[id]; exists {
@@ -3525,7 +3831,6 @@ func main() {
 						}
 					}
 					data.WaitConditionsStr = strings.Join(conds, ", ")
-
 					if node.Type == TypeJob && node.Command != "" {
 						scriptPath := node.Command
 						if scriptData, err := os.ReadFile(scriptPath); err == nil {
@@ -3534,13 +3839,11 @@ func main() {
 					}
 				}
 			}
-
 			if tab == "job_new" {
 				data.NewNodeType = r.URL.Query().Get("type")
 				data.ParentID = r.URL.Query().Get("parent")
 				data.SelectedJobID = r.URL.Query().Get("script_preselect")
 			}
-
 			// 2. スクリプト直接編集データロード
 			filePath := r.URL.Query().Get("file")
 			if filePath != "" {
@@ -3556,7 +3859,6 @@ func main() {
 					}
 				}
 			}
-
 			// 3. スケジュール設定データロード
 			for _, n := range engine.jobs {
 				if n.Type == TypeUnit || n.Type == TypeJob || n.Type == TypeNet {
@@ -3568,16 +3870,25 @@ func main() {
 				expr := s.CronExpr
 				if expr == "" {
 					min := s.Minute
-					if min == "" || min == "*" { min = "0" }
+					if min == "" || min == "*" {
+						min = "0"
+					}
 					hour := s.Hour
-					if hour == "" || hour == "*" { hour = "0" }
+					if hour == "" || hour == "*" {
+						hour = "0"
+					}
 					dom := s.Day
-					if dom == "" { dom = "*" }
+					if dom == "" {
+						dom = "*"
+					}
 					mon := s.Month
-					if mon == "" { mon = "*" }
+					if mon == "" {
+						mon = "*"
+					}
 					dow := s.Weekday
-					if dow == "" { dow = "*" }
-
+					if dow == "" {
+						dow = "*"
+					}
 					if s.Type == "hourly" {
 						expr = fmt.Sprintf("*/%d * * * *", s.Interval)
 					} else if s.Type == "interval" {
@@ -3596,6 +3907,9 @@ func main() {
 						}
 					}
 				}
+				if s.Args != "" {
+					targetName += " " + s.Args
+				}
 				lineText := fmt.Sprintf("%s %s # %s", expr, targetName, s.Name)
 				if !s.Enabled {
 					lineText = "# " + lineText
@@ -3603,17 +3917,14 @@ func main() {
 				cronLines = append(cronLines, lineText)
 			}
 			data.SchedulesCronText = strings.Join(cronLines, "\n")
-
 			// 4. ジョブ履歴データロード
 			keyword := r.URL.Query().Get("keyword")
 			startDateStr := r.URL.Query().Get("start_date")
 			endDateStr := r.URL.Query().Get("end_date")
 			filterStatus := r.URL.Query().Get("filter_status")
-
 			data.HistoryKeyword = keyword
 			data.HistoryStartDate = startDateStr
 			data.HistoryEndDate = endDateStr
-
 			var filteredSessions []*JobSession
 			for _, s := range engine.sessions {
 				if keyword != "" {
@@ -3622,22 +3933,29 @@ func main() {
 					}
 				}
 				if startDateStr != "" {
-					if s.StartDate < startDateStr { continue }
+					if s.StartDate < startDateStr {
+						continue
+					}
 				}
 				if endDateStr != "" {
-					if s.StartDate > endDateStr + " 23:59:59" { continue }
+					if s.StartDate > endDateStr+" 23:59:59" {
+						continue
+					}
 				}
 				if filterStatus != "" {
 					if filterStatus == "実行中" {
-						if s.Status != "実行中" { continue }
+						if s.Status != "実行中" {
+							continue
+						}
 					} else {
-						if s.Status != filterStatus { continue }
+						if s.Status != filterStatus {
+							continue
+						}
 					}
 				}
 				filteredSessions = append(filteredSessions, s)
 			}
 			data.Sessions = filteredSessions
-
 			var red, yellow, green, blue int
 			sessionID := r.URL.Query().Get("session_id")
 			if sessionID != "" {
@@ -3645,11 +3963,12 @@ func main() {
 					if s.SessionID == sessionID {
 						data.SelectedSessionID = sessionID
 						data.SelectedSession = s
-
 						var collectSessionNodes func(id string)
 						collectSessionNodes = func(id string) {
 							nState, exists := s.Nodes[id]
-							if !exists { return }
+							if !exists {
+								return
+							}
 							nodeDef := engine.jobs[id]
 							statusLabel := nState.Status
 							if nState.Status == "終了" && nodeDef != nil {
@@ -3666,23 +3985,22 @@ func main() {
 							}
 						}
 						collectSessionNodes(s.UnitID)
-
 						showLogJobID := r.URL.Query().Get("show_log")
 						if showLogJobID != "" {
 							if ns, exists := s.Nodes[showLogJobID]; exists {
 								data.ShowLogNode = ns
 							}
 						}
-						
+
 						// セッション全体の実行ログを連結して初期表示用ログを作成
 						var logParts []string
 						for _, sn := range data.SessionNodes {
 							nState := sn.Node
 							if nState.Log != "" {
-								logParts = append(logParts, fmt.Sprintf("--- [%s] (JobID: %s, Exit: %d) ---\n%s", 
+								logParts = append(logParts, fmt.Sprintf("--- [%s] (JobID: %s, Exit: %d) ---\n%s",
 									nState.Name, nState.JobID, nState.ExitValue, nState.Log))
 							} else if nState.Status != "待機中" && nState.Status != "保留中" {
-								logParts = append(logParts, fmt.Sprintf("--- [%s] (JobID: %s, Status: %s) ---\n(ログ出力はありません)\n", 
+								logParts = append(logParts, fmt.Sprintf("--- [%s] (JobID: %s, Status: %s) ---\n(ログ出力はありません)\n",
 									nState.Name, nState.JobID, nState.Status))
 							}
 						}
@@ -3722,7 +4040,6 @@ func main() {
 			data.YellowCount = yellow
 			data.GreenCount = green
 			data.BlueCount = blue
-
 		} else if isNodeTab {
 			id := r.URL.Query().Get("s")
 			sortKey := r.URL.Query().Get("sort")
@@ -3737,11 +4054,9 @@ func main() {
 			if filterStatus == "" {
 				filterStatus = "all"
 			}
-
 			data.SortKey = sortKey
 			data.SortOrder = sortOrder
 			data.FilterStatus = filterStatus
-
 			// 1. ノードマップ(トポロジー)＆監視最悪ステータス集計
 			var allNodes []*ManagedNode
 			for _, n := range engine.nodes {
@@ -3763,14 +4078,12 @@ func main() {
 				n.Description = worstStatus
 				allNodes = append(allNodes, n)
 			}
-
 			// CSVテキストの生成 (フィルター前の状態を常に全件保持)
 			var lines []string
 			for _, n := range allNodes {
 				lines = append(lines, fmt.Sprintf("%s,%s,%s,%s", n.Name, n.IPAddress, n.Platform, n.Description))
 			}
 			data.NodeCsvText = strings.Join(lines, "\n")
-
 			// 2. フィルタリングの適用
 			var filteredNodes []*ManagedNode
 			for _, n := range allNodes {
@@ -3785,12 +4098,10 @@ func main() {
 				}
 				filteredNodes = append(filteredNodes, n)
 			}
-
 			// 3. ソートの適用
 			sort.Slice(filteredNodes, func(i, j int) bool {
 				valI, valJ := filteredNodes[i], filteredNodes[j]
 				isLess := false
-
 				switch sortKey {
 				case "name":
 					isLess = valI.Name < valJ.Name
@@ -3813,15 +4124,12 @@ func main() {
 				default:
 					isLess = ipToUint32(valI.IPAddress) < ipToUint32(valJ.IPAddress)
 				}
-
 				if sortOrder == "desc" {
 					return !isLess
 				}
 				return isLess
 			})
-
 			data.Nodes = filteredNodes
-
 			if id != "" {
 				if n, exists := engine.nodes[id]; exists {
 					data.SelectedNodeID = id
@@ -3833,7 +4141,6 @@ func main() {
 					}
 				}
 			}
-
 			// 4. 監視管理データロード (全体)
 			data.MonitorHistory = engine.monHistory
 			var allMonitors []*MonitorSetting
@@ -3897,11 +4204,19 @@ func main() {
 			data.BlueCount = blue
 			data.TotalCount = len(engine.monitors)
 		}
-
+		// JSON シリアライズ（JS用データの埋め込み）
+		if jobsBytes, err := json.Marshal(engine.jobs); err == nil {
+			data.JobsJSON = string(jobsBytes)
+		}
+		if schedulesBytes, err := json.Marshal(engine.schedules); err == nil {
+			data.SchedulesJSON = string(schedulesBytes)
+		}
+		if monitorsBytes, err := json.Marshal(engine.monitors); err == nil {
+			data.MonitorsJSON = string(monitorsBytes)
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_ = tmpl.Execute(w, data)
 	}))
-
 	http.HandleFunc("/export", basicAuth(func(w http.ResponseWriter, r *http.Request) {
 		engine.mu.Lock()
 		var jobList []*JobNode
@@ -3920,18 +4235,15 @@ func main() {
 			backup.Monitors = append(backup.Monitors, m)
 		}
 		engine.mu.Unlock()
-
 		data, err := yaml.Marshal(backup)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-
 		w.Header().Set("Content-Type", "application/x-yaml")
 		w.Header().Set("Content-Disposition", "attachment; filename=himenos_backup.yaml")
 		w.Write(data)
 	}))
-
 	http.HandleFunc("/import", basicAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Redirect(w, r, "/?tab=settings", http.StatusSeeOther)
@@ -3939,23 +4251,20 @@ func main() {
 		}
 		file, _, err := r.FormFile("backup_file")
 		if err != nil {
-			http.Redirect(w, r, "/?tab=settings&err=" + err.Error(), http.StatusSeeOther)
+			http.Redirect(w, r, "/?tab=settings&err="+err.Error(), http.StatusSeeOther)
 			return
 		}
 		defer file.Close()
-
 		yamlData, err := io.ReadAll(file)
 		if err != nil {
-			http.Redirect(w, r, "/?tab=settings&err=" + err.Error(), http.StatusSeeOther)
+			http.Redirect(w, r, "/?tab=settings&err="+err.Error(), http.StatusSeeOther)
 			return
 		}
-
 		var backup BackupData
 		if err := yaml.Unmarshal(yamlData, &backup); err != nil {
-			http.Redirect(w, r, "/?tab=settings&err=YAMLファイルの解析に失敗しました: " + err.Error(), http.StatusSeeOther)
+			http.Redirect(w, r, "/?tab=settings&err=YAMLファイルの解析に失敗しました: "+err.Error(), http.StatusSeeOther)
 			return
 		}
-
 		engine.mu.Lock()
 		if backup.Jobs != nil {
 			engine.jobs = make(map[string]*JobNode)
@@ -3970,7 +4279,6 @@ func main() {
 		}
 		engine.settings = backup.Settings
 		engine.saveSettings()
-
 		if backup.Nodes != nil {
 			engine.nodes = make(map[string]*ManagedNode)
 			for _, n := range backup.Nodes {
@@ -3986,21 +4294,17 @@ func main() {
 			engine.saveMonitors()
 		}
 		engine.mu.Unlock()
-
 		http.Redirect(w, r, "/?tab=settings&err=設定インポートが成功しました。", http.StatusSeeOther)
 	}))
-
 	http.HandleFunc("/action", basicAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return
 		}
-
 		action := r.FormValue("action")
 		redirectTo := "/"
-
 		switch action {
-						case "create_job":
+		case "create_job":
 			nodeType := JobType(r.FormValue("type"))
 			parentID := r.FormValue("parent_id")
 			name := r.FormValue("name")
@@ -4015,16 +4319,13 @@ func main() {
 					name = "新規ジョブ"
 				}
 			}
-
 			// IDを自動生成
 			id := "job_" + fmt.Sprintf("%d", time.Now().UnixNano())
-
 			// 簡素化された通知
 			notifyVal := r.FormValue("notify_all")
 			if notifyVal == "" {
 				notifyVal = "default"
 			}
-
 			node := &JobNode{
 				ID:            id,
 				Name:          name,
@@ -4037,28 +4338,24 @@ func main() {
 				NotifyWarning: notifyVal,
 				NotifyError:   notifyVal,
 			}
-
 			if nodeType == TypeJob {
 				node.RunUser = r.FormValue("run_user") // 引数
-
 				scriptSelect := r.FormValue("script_select")
 				if scriptSelect == "__NEW__" {
 					filename := r.FormValue("script_filename")
 					content := r.FormValue("script_content")
-
 					// バリデーション: ファイル名または本文が空なら作成不可
 					if filename == "" || content == "" {
 						redirectTo = fmt.Sprintf("/?tab=job_new&type=job&parent=%s&err=%s", parentID, "新規ジョブにはスクリプトファイル名と本文の入力が必須です。")
 						http.Redirect(w, r, redirectTo, http.StatusSeeOther)
 						return
 					}
-
 					if !strings.HasSuffix(filename, ".sh") && !strings.HasSuffix(filename, ".bat") {
 						filename += ".sh"
 					}
 					scriptPath := filepath.Join(scriptsDir, filename)
 					_ = os.WriteFile(scriptPath, []byte(content), 0755)
-					gitCommit("Web: Create script " + filename, scriptPath)
+					gitCommit("Web: Create script "+filename, scriptPath)
 					node.Command = scriptPath
 				} else {
 					// 既存のスクリプトを選択。これも空ならエラー
@@ -4070,7 +4367,6 @@ func main() {
 					node.Command = scriptSelect
 				}
 			}
-
 			// 待ち条件のパース (ジョブ名からIDへ逆解決)
 			waitStr := r.FormValue("wait_conditions")
 			if waitStr != "" {
@@ -4099,7 +4395,6 @@ func main() {
 				}
 				engine.mu.Unlock()
 			}
-
 			engine.mu.Lock()
 			engine.jobs[id] = node
 			if parentID != "" {
@@ -4110,14 +4405,13 @@ func main() {
 			engine.saveJobs()
 			engine.mu.Unlock()
 			redirectTo = "/?tab=jobs&s=" + id
-
-						case "update_job":
+		case "update_job":
 			id := r.FormValue("id")
 			engine.mu.Lock()
 			node, exists := engine.jobs[id]
 			if exists {
 				node.Name = r.FormValue("name")
-				
+
 				notifyVal := r.FormValue("notify_all")
 				if notifyVal == "" {
 					notifyVal = "default"
@@ -4126,10 +4420,8 @@ func main() {
 				node.NotifyNormal = notifyVal
 				node.NotifyWarning = notifyVal
 				node.NotifyError = notifyVal
-
 				if node.Type == TypeJob {
 					node.RunUser = r.FormValue("run_user")
-
 					// スクリプト編集
 					if node.Command != "" {
 						scriptContent := r.FormValue("script_content")
@@ -4140,10 +4432,9 @@ func main() {
 							return
 						}
 						_ = os.WriteFile(node.Command, []byte(scriptContent), 0755)
-						gitCommit("Web: Update script content for " + id, node.Command)
+						gitCommit("Web: Update script content for "+id, node.Command)
 					}
 				}
-
 				// 待ち条件の更新 (ジョブ名からIDへ逆解決)
 				node.WaitConditions = nil
 				waitStr := r.FormValue("wait_conditions")
@@ -4174,7 +4465,6 @@ func main() {
 			}
 			engine.mu.Unlock()
 			redirectTo = "/?tab=jobs&s=" + id
-
 		case "delete_job":
 			id := r.FormValue("id")
 			engine.mu.Lock()
@@ -4204,7 +4494,6 @@ func main() {
 			engine.saveJobs()
 			engine.mu.Unlock()
 			redirectTo = "/?tab=jobs"
-
 		case "toggle_script":
 			filePath := r.FormValue("file")
 			if !strings.HasPrefix(filepath.ToSlash(filePath), "scripts/") {
@@ -4212,36 +4501,32 @@ func main() {
 				http.Redirect(w, r, redirectTo, http.StatusSeeOther)
 				return
 			}
-			
+
 			if strings.HasSuffix(filePath, ".disabled") {
 				newPath := strings.TrimSuffix(filePath, ".disabled")
 				_ = os.Rename(filePath, newPath)
-				gitCommit("Web: Enable script " + filepath.Base(newPath), newPath)
+				gitCommit("Web: Enable script "+filepath.Base(newPath), newPath)
 				redirectTo = "/?tab=script_edit&file=" + newPath
 			} else {
 				newPath := filePath + ".disabled"
 				_ = os.Rename(filePath, newPath)
-				gitCommit("Web: Disable script " + filepath.Base(filePath), newPath)
+				gitCommit("Web: Disable script "+filepath.Base(filePath), newPath)
 				redirectTo = "/?tab=script_edit&file=" + newPath
 			}
-
 		case "run_job":
 			id := r.FormValue("id")
-			sessionID := engine.StartSession(id, "手動実行", "Admin")
+			sessionID := engine.StartSession(id, "手動実行", "Admin", r.FormValue("args"))
 			redirectTo = "/?tab=history&session_id=" + sessionID
-
 		case "stop_node":
 			sessionID := r.FormValue("session_id")
 			jobID := r.FormValue("job_id")
 			control := r.FormValue("control") // "コマンド", "保留解除" などのオペレーション
 			engine.StopNode(sessionID, jobID, control)
 			redirectTo = "/?tab=history&session_id=" + sessionID
-
 		case "create_schedule":
 			jobID := r.FormValue("job_id")
 			schedID := "sched_" + jobID + "_" + fmt.Sprintf("%d", time.Now().Unix())
 			intervalVal, _ := strconv.Atoi(r.FormValue("interval"))
-
 			monthVal := "*"
 			dayVal := "*"
 			runDateStr := r.FormValue("run_date")
@@ -4253,7 +4538,6 @@ func main() {
 					dayVal = fmt.Sprintf("%d", d)
 				}
 			}
-
 			sched := Schedule{
 				ID:       schedID,
 				Name:     r.FormValue("name"),
@@ -4266,6 +4550,7 @@ func main() {
 				Hour:     r.FormValue("hour"),
 				Minute:   r.FormValue("minute"),
 				Interval: intervalVal,
+				Args:     r.FormValue("args"),
 				Enabled:  true,
 			}
 			engine.mu.Lock()
@@ -4273,7 +4558,6 @@ func main() {
 			engine.saveSchedules()
 			engine.mu.Unlock()
 			redirectTo = "/?tab=schedules"
-
 		case "toggle_schedule":
 			id := r.FormValue("id")
 			engine.mu.Lock()
@@ -4286,7 +4570,6 @@ func main() {
 			engine.saveSchedules()
 			engine.mu.Unlock()
 			redirectTo = "/?tab=schedules"
-
 		case "delete_schedule":
 			id := r.FormValue("id")
 			engine.mu.Lock()
@@ -4300,20 +4583,16 @@ func main() {
 			engine.saveSchedules()
 			engine.mu.Unlock()
 			redirectTo = "/?tab=schedules"
-
 		case "save_schedules_bulk":
 			schedulesCron := r.FormValue("cron_text")
 			engine.mu.Lock()
-
 			var newScheds []Schedule
 			lines := strings.Split(schedulesCron, "\n")
-
 			for _, line := range lines {
 				line = strings.TrimSpace(line)
 				if line == "" {
 					continue
 				}
-
 				enabled := true
 				if strings.HasPrefix(line, "#") {
 					enabled = false
@@ -4322,7 +4601,6 @@ func main() {
 						continue
 					}
 				}
-
 				var schedName string
 				var mainPart string
 				if idx := strings.LastIndex(line, "#"); idx != -1 {
@@ -4332,15 +4610,18 @@ func main() {
 					mainPart = line
 					schedName = "一括登録スケジュール"
 				}
-
 				fields := strings.Fields(mainPart)
 				if len(fields) < 6 {
 					continue
 				}
-
 				cronExpr := strings.Join(fields[0:5], " ")
 				jobID := fields[5]
-				
+
+				var schedArgs string
+				if len(fields) > 6 {
+					schedArgs = strings.Join(fields[6:], " ")
+				}
+
 				// ジョブの逆引き & 実ファイル指定からの自動ジョブ生成
 				// ジョブの逆引き & 実ファイル指定からの自動ジョブ生成
 				var targetJob *JobNode = nil
@@ -4356,19 +4637,17 @@ func main() {
 						}
 					}
 				}
-
 				if targetJob == nil {
 					// 2. 実ファイルパス指定による自動ジョブ生成
 					normalizedPath := strings.ReplaceAll(jobID, "\\", "/")
-					
+
 					// 拡張子があって scripts/ で始まっていない場合は scripts/ を自動付加
 					if !strings.HasPrefix(normalizedPath, "scripts/") && (strings.HasSuffix(normalizedPath, ".sh") || strings.HasSuffix(normalizedPath, ".bat") || strings.HasSuffix(normalizedPath, ".py") || strings.HasSuffix(normalizedPath, ".exe")) {
 						normalizedPath = "scripts/" + normalizedPath
 					}
-
 					if strings.HasPrefix(normalizedPath, "scripts/") {
 						jobName := strings.TrimPrefix(normalizedPath, "scripts/")
-						
+
 						// 同一スクリプトパスのジョブが既にないか確認
 						var foundJob *JobNode = nil
 						for _, j := range engine.jobs {
@@ -4377,7 +4656,6 @@ func main() {
 								break
 							}
 						}
-
 						if foundJob != nil {
 							targetJob = foundJob
 							jobID = foundJob.ID
@@ -4385,26 +4663,24 @@ func main() {
 							// ジョブ定義を新規自動作成
 							newJobID := "job_" + fmt.Sprintf("%d", time.Now().UnixNano())
 							newJob := JobNode{
-								ID:          newJobID,
-								Name:        jobName,
-								Type:        TypeJob,
-								Command:     normalizedPath,
-								Children:    []string{},
+								ID:       newJobID,
+								Name:     jobName,
+								Type:     TypeJob,
+								Command:  normalizedPath,
+								Children: []string{},
 							}
 							engine.jobs[newJobID] = &newJob
 							engine.saveJobs()
-							
+
 							targetJob = &newJob
 							jobID = newJobID
 						}
 					}
 				}
-
 				if targetJob == nil {
 					// ジョブが特定・自動生成できなかった場合は無視してスキップ
 					continue
 				}
-
 				var schedID string
 				for _, oldSched := range engine.schedules {
 					if oldSched.JobID == jobID && oldSched.CronExpr == cronExpr {
@@ -4415,29 +4691,26 @@ func main() {
 				if schedID == "" {
 					schedID = "sched_" + jobID + "_" + fmt.Sprintf("%d", time.Now().UnixNano())
 				}
-
 				newScheds = append(newScheds, Schedule{
 					ID:       schedID,
 					Name:     schedName,
 					JobID:    jobID,
 					Type:     "cron",
 					CronExpr: cronExpr,
+					Args:     schedArgs,
 					Enabled:  enabled,
 				})
 			}
-
 			engine.schedules = newScheds
 			engine.saveSchedules()
 			engine.mu.Unlock()
 			redirectTo = "/?tab=schedules"
-
 		case "create_node":
 			name := r.FormValue("name")
 			ip := r.FormValue("ip_address")
 			platform := r.FormValue("platform")
 			desc := r.FormValue("description")
 			id := "node_" + fmt.Sprintf("%d", time.Now().UnixNano())
-
 			node := &ManagedNode{
 				ID:          id,
 				Name:        name,
@@ -4448,7 +4721,6 @@ func main() {
 			engine.mu.Lock()
 			engine.nodes[id] = node
 			engine.saveNodes()
-
 			// デフォルトPing監視の自動追加
 			monitorID := "mon_ping_" + id
 			monitor := &MonitorSetting{
@@ -4464,30 +4736,24 @@ func main() {
 			engine.saveMonitors()
 			engine.mu.Unlock()
 			redirectTo = "/?tab=nodes&s=" + id
-
 		case "save_nodes_bulk":
 			nodesCSV := r.FormValue("nodes_csv")
 			engine.mu.Lock()
-
 			newNodes := make(map[string]*ManagedNode)
 			lines := strings.Split(nodesCSV, "\n")
 			nodeCounter := int64(0)
-
 			for _, line := range lines {
 				line = strings.TrimSpace(line)
 				if line == "" {
 					continue
 				}
-
 				parts := strings.Split(line, ",")
 				if len(parts) < 2 {
 					parts = strings.Split(line, "，")
 				}
-
 				var name, ipOrCIDR string
 				var platform string = "LINUX"
 				var desc string = ""
-
 				if len(parts) >= 2 {
 					name = strings.TrimSpace(parts[0])
 					ipOrCIDR = strings.TrimSpace(parts[1])
@@ -4505,17 +4771,14 @@ func main() {
 					ipOrCIDR = strings.TrimSpace(parts[0])
 					name = ""
 				}
-
 				if ipOrCIDR == "" {
 					continue
 				}
-
 				// IPOrCIDRがCIDR形式か確認して展開
 				var ipList []string
 				if strings.Contains(ipOrCIDR, "/") {
 					ipList = expandCIDR(ipOrCIDR)
 				}
-
 				if len(ipList) > 0 {
 					// CIDR展開登録
 					for _, expandedIP := range ipList {
@@ -4525,7 +4788,6 @@ func main() {
 						} else {
 							nodeName = fmt.Sprintf("%s_%s", name, expandedIP)
 						}
-
 						var nodeID string
 						exists := false
 						for oldID, oldNode := range engine.nodes {
@@ -4535,11 +4797,10 @@ func main() {
 								break
 							}
 						}
-
 						if !exists {
 							nodeID = fmt.Sprintf("node_%d_%d", time.Now().UnixNano(), nodeCounter)
 							nodeCounter++
-							
+
 							monitorID := "mon_ping_" + nodeID
 							monitor := &MonitorSetting{
 								ID:         monitorID,
@@ -4552,7 +4813,6 @@ func main() {
 							}
 							engine.monitors[monitorID] = monitor
 						}
-
 						newNodes[nodeID] = &ManagedNode{
 							ID:          nodeID,
 							Name:        nodeName,
@@ -4566,7 +4826,6 @@ func main() {
 					if name == "" {
 						name = ipOrCIDR
 					}
-
 					var nodeID string
 					exists := false
 					for oldID, oldNode := range engine.nodes {
@@ -4576,11 +4835,10 @@ func main() {
 							break
 						}
 					}
-
 					if !exists {
 						nodeID = fmt.Sprintf("node_%d_%d", time.Now().UnixNano(), nodeCounter)
 						nodeCounter++
-						
+
 						monitorID := "mon_ping_" + nodeID
 						monitor := &MonitorSetting{
 							ID:         monitorID,
@@ -4593,7 +4851,6 @@ func main() {
 						}
 						engine.monitors[monitorID] = monitor
 					}
-
 					newNodes[nodeID] = &ManagedNode{
 						ID:          nodeID,
 						Name:        name,
@@ -4603,43 +4860,39 @@ func main() {
 					}
 				}
 			}
-
 			// 削除されたノードに関連する監視設定を除去
 			for mID, m := range engine.monitors {
 				if _, exists := newNodes[m.NodeID]; !exists {
 					delete(engine.monitors, mID)
 				}
 			}
-
-			            // 全登録ノードに対してデフォルトのPING死活監視が存在しない場合は自動補完
-            for nodeID, node := range newNodes {
-                hasPing := false
-                for _, m := range engine.monitors {
-                    if m.NodeID == nodeID && m.Type == "ping" {
-                        hasPing = true
-                        break
-                    }
-                }
-                if !hasPing {
-                    monitorID := "mon_ping_" + nodeID
-                    engine.monitors[monitorID] = &MonitorSetting{
-                        ID:         monitorID,
-                        Name:       "Ping監視",
-                        NodeID:     nodeID,
-                        Type:       "ping",
-                        Target:     node.IPAddress,
-                        Enabled:    true,
-                        LastStatus: "未実施",
-                    }
-                }
-            }
-
-            engine.nodes = newNodes
-            engine.saveNodes()
-            engine.saveMonitors()
-            engine.mu.Unlock()
-            redirectTo = "/?tab=nodes" 
-
+			// 全登録ノードに対してデフォルトのPING死活監視が存在しない場合は自動補完
+			for nodeID, node := range newNodes {
+				hasPing := false
+				for _, m := range engine.monitors {
+					if m.NodeID == nodeID && m.Type == "ping" {
+						hasPing = true
+						break
+					}
+				}
+				if !hasPing {
+					monitorID := "mon_ping_" + nodeID
+					engine.monitors[monitorID] = &MonitorSetting{
+						ID:         monitorID,
+						Name:       "Ping監視",
+						NodeID:     nodeID,
+						Type:       "ping",
+						Target:     node.IPAddress,
+						Enabled:    true,
+						LastStatus: "未実施",
+					}
+				}
+			}
+			engine.nodes = newNodes
+			engine.saveNodes()
+			engine.saveMonitors()
+			engine.mu.Unlock()
+			redirectTo = "/?tab=nodes"
 		case "toggle_monitor":
 			id := r.FormValue("id")
 			nodeID := r.FormValue("node_id")
@@ -4650,7 +4903,6 @@ func main() {
 			}
 			engine.mu.Unlock()
 			redirectTo = "/?tab=nodes&s=" + nodeID
-
 		case "delete_nodes_by_status":
 			status := r.FormValue("status")
 			engine.mu.Lock()
@@ -4676,7 +4928,6 @@ func main() {
 			engine.saveMonitors()
 			engine.mu.Unlock()
 			redirectTo = "/?tab=nodes"
-
 		case "delete_node":
 			id := r.FormValue("id")
 			engine.mu.Lock()
@@ -4691,36 +4942,45 @@ func main() {
 			engine.saveMonitors()
 			engine.mu.Unlock()
 			redirectTo = "/?tab=nodes"
-
 		case "create_monitor":
 			nodeID := r.FormValue("node_id")
 			name := r.FormValue("name")
 			mType := r.FormValue("type")
 			target := r.FormValue("target")
 			id := "mon_" + fmt.Sprintf("%d", time.Now().UnixNano())
-
 			if mType == "ping" {
 				// pingの場合は自動的にノードのIPアドレスを使うのでtargetは空でもよいが、記録用にセット
 				if node, exists := engine.nodes[nodeID]; exists {
 					target = node.IPAddress
 				}
 			}
-
+			if name == "" {
+				name = mType + " monitor"
+				if node, exists := engine.nodes[nodeID]; exists {
+					name = fmt.Sprintf("%s PING監視", node.Name)
+					if mType == "port" {
+						name = fmt.Sprintf("%s ポート%s監視", node.Name, target)
+					}
+				}
+			}
 			m := &MonitorSetting{
-				ID:         id,
-				Name:       name,
-				NodeID:     nodeID,
-				Type:       mType,
-				Target:     target,
-				Enabled:    true,
-				LastStatus: "未実施",
+				ID:             id,
+				Name:           name,
+				NodeID:         nodeID,
+				Type:           mType,
+				Target:         target,
+				Enabled:        true,
+				LastStatus:     "未実施",
+				OnErrorScript:  r.FormValue("on_error_script"),
+				OnErrorArgs:    r.FormValue("on_error_args"),
+				OnNormalScript: r.FormValue("on_normal_script"),
+				OnNormalArgs:   r.FormValue("on_normal_args"),
 			}
 			engine.mu.Lock()
 			engine.monitors[id] = m
 			engine.saveMonitors()
 			engine.mu.Unlock()
 			redirectTo = "/?tab=nodes&s=" + nodeID
-
 		case "delete_monitor":
 			id := r.FormValue("id")
 			nodeID := r.FormValue("node_id")
@@ -4729,15 +4989,13 @@ func main() {
 			engine.saveMonitors()
 			engine.mu.Unlock()
 			redirectTo = "/?tab=nodes&s=" + nodeID
-
 		case "save_script_only":
 			filePath := r.FormValue("filepath")
 			scriptContent := r.FormValue("script_content")
 			_ = os.WriteFile(filePath, []byte(scriptContent), 0755)
-			gitCommit("Web: Save script " + filePath, filePath)
+			gitCommit("Web: Save script "+filePath, filePath)
 			redirectTo = "/?tab=script_edit&file=" + filePath
 
-		
 		case "add_basic_user":
 			username := r.FormValue("username")
 			password := r.FormValue("password")
@@ -4757,7 +5015,6 @@ func main() {
 			}
 			engine.mu.Unlock()
 			redirectTo = "/?tab=settings"
-
 		case "delete_basic_user":
 			username := r.FormValue("username")
 			engine.mu.Lock()
@@ -4771,7 +5028,6 @@ func main() {
 			engine.saveSettings()
 			engine.mu.Unlock()
 			redirectTo = "/?tab=settings"
-
 		case "add_allowed_ip":
 			ip := r.FormValue("ip")
 			engine.mu.Lock()
@@ -4790,7 +5046,6 @@ func main() {
 			}
 			engine.mu.Unlock()
 			redirectTo = "/?tab=settings"
-
 		case "delete_allowed_ip":
 			ip := r.FormValue("ip")
 			engine.mu.Lock()
@@ -4804,7 +5059,6 @@ func main() {
 			engine.saveSettings()
 			engine.mu.Unlock()
 			redirectTo = "/?tab=settings"
-
 		case "update_security_settings":
 			ipRestrict := r.FormValue("ip_restriction_enabled") == "true"
 			engine.mu.Lock()
@@ -4812,9 +5066,7 @@ func main() {
 			engine.saveSettings()
 			engine.mu.Unlock()
 			redirectTo = "/?tab=settings"
-
 		case "update_settings":
-
 			engine.mu.Lock()
 			engine.settings.DefaultNotify = r.FormValue("default_notify")
 			engine.settings.SlackWebhook = r.FormValue("slack_webhook")
@@ -4827,7 +5079,6 @@ func main() {
 			engine.saveSettings()
 			engine.mu.Unlock()
 			redirectTo = "/?tab=settings"
-
 		case "test_slack":
 			webhookURL := r.FormValue("slack_webhook")
 			if webhookURL == "" {
@@ -4839,7 +5090,6 @@ func main() {
 				sendSlack(webhookURL, "これは Himenos からの Slack テスト通知です。正常に送信されました！")
 				redirectTo = "/?tab=settings&msg=" + url.QueryEscape("Slack通知のテスト送信を実行しました。Slackチャンネルを確認してください。")
 			}
-
 		case "test_email":
 			settings := Settings{
 				SMTPHost: r.FormValue("smtp_host"),
@@ -4849,13 +5099,24 @@ func main() {
 				SMTPFrom: r.FormValue("smtp_from"),
 				SMTPTo:   r.FormValue("smtp_to"),
 			}
-			if settings.SMTPHost == "" { settings.SMTPHost = engine.settings.SMTPHost }
-			if settings.SMTPPort == "" { settings.SMTPPort = engine.settings.SMTPPort }
-			if settings.SMTPUser == "" { settings.SMTPUser = engine.settings.SMTPUser }
-			if settings.SMTPPass == "" { settings.SMTPPass = engine.settings.SMTPPass }
-			if settings.SMTPFrom == "" { settings.SMTPFrom = engine.settings.SMTPFrom }
-			if settings.SMTPTo == "" { settings.SMTPTo = engine.settings.SMTPTo }
-
+			if settings.SMTPHost == "" {
+				settings.SMTPHost = engine.settings.SMTPHost
+			}
+			if settings.SMTPPort == "" {
+				settings.SMTPPort = engine.settings.SMTPPort
+			}
+			if settings.SMTPUser == "" {
+				settings.SMTPUser = engine.settings.SMTPUser
+			}
+			if settings.SMTPPass == "" {
+				settings.SMTPPass = engine.settings.SMTPPass
+			}
+			if settings.SMTPFrom == "" {
+				settings.SMTPFrom = engine.settings.SMTPFrom
+			}
+			if settings.SMTPTo == "" {
+				settings.SMTPTo = engine.settings.SMTPTo
+			}
 			if settings.SMTPHost == "" || settings.SMTPTo == "" {
 				if settings.SMTPTo == "" {
 					redirectTo = "/?tab=settings&err=" + url.QueryEscape("送信先メールアドレス(To)が入力されていません。")
@@ -4868,17 +5129,14 @@ func main() {
 				redirectTo = "/?tab=settings&msg=" + url.QueryEscape("SMTPメールのテスト送信を実行しました。受信ボックスを確認してください。")
 			}
 		}
-
 		http.Redirect(w, r, redirectTo, http.StatusSeeOther)
 	}))
-
 	fmt.Println("Server started on :8080")
 	err := http.ListenAndServe(":8080", nil)
 	if err != nil {
 		panic(err)
 	}
 }
-
 func expandCIDR(cidr string) []string {
 	ip, ipnet, err := net.ParseCIDR(cidr)
 	if err != nil {
@@ -4888,21 +5146,17 @@ func expandCIDR(cidr string) []string {
 	if ip4 == nil {
 		return nil
 	}
-
 	var ips []string
 	ones, bits := ipnet.Mask.Size()
 	if bits != 32 {
 		return nil
 	}
-
 	// 負荷保護のため /22（1024ホスト）以上の大きさのサブネットは除外する
 	if ones < 22 {
 		return nil
 	}
-
 	startIP := ip4ToUint32(ipnet.IP)
 	numHosts := 1 << (32 - ones)
-
 	for i := 0; i < numHosts; i++ {
 		currentIP := uint32ToIP4(startIP + uint32(i))
 		// /31 や /32 以外の場合、ネットワークアドレスとブロードキャストアドレスを除外
@@ -4915,12 +5169,10 @@ func expandCIDR(cidr string) []string {
 	}
 	return ips
 }
-
 func ip4ToUint32(ip net.IP) uint32 {
 	ip = ip.To4()
 	return uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
 }
-
 func uint32ToIP4(val uint32) net.IP {
 	return net.IPv4(byte(val>>24), byte(val>>16), byte(val>>8), byte(val))
 }
