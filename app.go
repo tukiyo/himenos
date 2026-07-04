@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/smtp"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,15 +40,23 @@ const (
 
 // --- データモデルの定義 ---
 
+type BasicAuthUser struct {
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+}
+
 type Settings struct {
-	SMTPHost      string `yaml:"smtp_host"`
-	SMTPPort      string `yaml:"smtp_port"`
-	SMTPUser      string `yaml:"smtp_user"`
-	SMTPPass      string `yaml:"smtp_pass"`
-	SMTPFrom      string `yaml:"smtp_from"`
-	SMTPTo        string `yaml:"smtp_to"`
-	SlackWebhook  string `yaml:"slack_webhook"`
-	DefaultNotify string `yaml:"default_notify"` // デフォルト通知設定
+	SMTPHost             string          `yaml:"smtp_host"`
+	SMTPPort             string          `yaml:"smtp_port"`
+	SMTPUser             string          `yaml:"smtp_user"`
+	SMTPPass             string          `yaml:"smtp_pass"`
+	SMTPFrom             string          `yaml:"smtp_from"`
+	SMTPTo               string          `yaml:"smtp_to"`
+	SlackWebhook         string          `yaml:"slack_webhook"`
+	DefaultNotify        string          `yaml:"default_notify"` // デフォルト通知設定
+	BasicAuthUsers       []BasicAuthUser `yaml:"basic_auth_users"`
+	AllowedIPs           []string        `yaml:"allowed_ips"`
+	IPRestrictionEnabled bool            `yaml:"ip_restriction_enabled"`
 }
 
 type JobType string
@@ -1157,11 +1166,53 @@ const htmlTemplate = `<!DOCTYPE html>
     <meta charset="UTF-8">
     <title>Himenos クライアント</title>
     <style>
+        :root {
+            --bg-color: #f0f0f0;
+            --panel-bg: #ffffff;
+            --text-color: #000000;
+            --border-color: #b0b0b0;
+            --header-bg: linear-gradient(to bottom, #e1e9f6, #c5d7ed);
+            --header-text: #1e395b;
+            --toolbar-bg: #f5f5f5;
+            --status-bar-bg: #e1e1e1;
+            --card-bg: #ffffff;
+            --alert-bg: #fafafa;
+            --btn-hover: #e5e5e5;
+            --btn-active: #ffffff;
+            --input-bg: #ffffff;
+        }
+        
+        [data-theme="dark"] button, [data-theme="dark"] .btn {
+            background: linear-gradient(to bottom, #3a3a3a, #2d2d2d) !important;
+            border-color: #555 !important;
+            color: #e0e0e0 !important;
+        }
+        [data-theme="dark"] input, [data-theme="dark"] select, [data-theme="dark"] textarea {
+            background: #2d2d2d !important;
+            color: #e0e0e0 !important;
+            border: 1px solid #555 !important;
+        }
+
+        [data-theme="dark"] {
+            --bg-color: #121212;
+            --panel-bg: #1e1e1e;
+            --text-color: #e0e0e0;
+            --border-color: #3d3d3d;
+            --header-bg: linear-gradient(to bottom, #2b3a4a, #1a2535);
+            --header-text: #ecf0f5;
+            --toolbar-bg: #181818;
+            --status-bar-bg: #181818;
+            --card-bg: #282828;
+            --alert-bg: #242424;
+            --btn-hover: #333333;
+            --btn-active: #1e1e1e;
+            --input-bg: #2d2d2d;
+        }
         /* 全体スタイル - Windowsクラシック / Eclipse RCP風 */
         body {
             font-family: 'MS PGothic', 'Meiryo', sans-serif;
-            background: #f0f0f0;
-            color: #000;
+            background: var(--bg-color);
+            color: var(--text-color);
             margin: 0;
             padding: 0;
             font-size: 12px;
@@ -1169,8 +1220,8 @@ const htmlTemplate = `<!DOCTYPE html>
 
         /* ツールバー (タブ・パースペクティブ) */
         .toolbar {
-            background: #f5f5f5;
-            border-bottom: 1px solid #b0b0b0;
+            background: var(--toolbar-bg);
+            border-bottom: 1px solid var(--border-color);
             padding: 6px 10px;
             display: flex;
             gap: 5px;
@@ -1189,15 +1240,15 @@ const htmlTemplate = `<!DOCTYPE html>
             gap: 3px;
         }
         .tool-btn:hover {
-            background: #e5e5e5;
-            border-color: #ccc;
+            background: var(--btn-hover);
+            border-color: var(--border-color);
         }
         .tool-active {
-            background: #ffffff;
-            border: 1px solid #b0b0b0;
-            border-bottom-color: #ffffff;
+            background: var(--btn-active);
+            border: 1px solid var(--border-color);
+            border-bottom-color: var(--btn-active);
             font-weight: bold;
-            color: #000;
+            color: var(--text-color);
             margin-bottom: -7px;
             padding-bottom: 6px;
             border-top: 3px solid #1d50a2;
@@ -1213,24 +1264,24 @@ const htmlTemplate = `<!DOCTYPE html>
         }
         .pane-left {
             width: 30%;
-            background: #ffffff;
-            border: 1px solid #b0b0b0;
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
             display: flex;
             flex-direction: column;
             box-sizing: border-box;
         }
         .pane-right {
             width: 70%;
-            background: #ffffff;
-            border: 1px solid #b0b0b0;
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
             display: flex;
             flex-direction: column;
             box-sizing: border-box;
         }
         .pane-full {
             width: 100%;
-            background: #ffffff;
-            border: 1px solid #b0b0b0;
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
             padding: 10px;
             box-sizing: border-box;
             overflow-y: auto;
@@ -1238,11 +1289,11 @@ const htmlTemplate = `<!DOCTYPE html>
 
         /* ビューのタイトルバー */
         .view-title {
-            background: linear-gradient(to bottom, #e1e9f6, #c5d7ed);
-            border-bottom: 1px solid #99b4d1;
+            background: var(--header-bg);
+            border-bottom: 1px solid var(--border-color);
             padding: 4px 8px;
             font-weight: bold;
-            color: #1e395b;
+            color: var(--header-text);
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -1269,28 +1320,36 @@ const htmlTemplate = `<!DOCTYPE html>
         }
         .tree-link {
             text-decoration: none;
-            color: #000;
+            color: var(--text-color);
         }
         .tree-link:hover {
             text-decoration: underline;
+        }
+
+        
+        a {
+            color: #0d47a1;
+        }
+        [data-theme="dark"] a {
+            color: #64b5f6 !important;
         }
 
         /* テーブル */
         table {
             width: 100%;
             border-collapse: collapse;
-            border: 1px solid #ccc;
+            border: 1px solid var(--border-color);
             margin-bottom: 10px;
         }
         th, td {
-            border: 1px solid #ccc;
+            border: 1px solid var(--border-color);
             padding: 4px 6px;
             font-size: 12px;
             text-align: left;
         }
         th {
-            background: linear-gradient(to bottom, #ffffff, #ebebeb);
-            color: #000;
+            background: var(--header-bg);
+            color: var(--text-color);
             font-weight: normal;
             border-bottom: 2px solid #ccc;
         }
@@ -1301,7 +1360,7 @@ const htmlTemplate = `<!DOCTYPE html>
         /* ボタン */
         button, .btn {
             background: linear-gradient(to bottom, #fcfcfc, #e6e6e6);
-            border: 1px solid #b0b0b0;
+            border: 1px solid var(--border-color);
             color: #000;
             padding: 3px 10px;
             font-size: 12px;
@@ -1314,28 +1373,65 @@ const htmlTemplate = `<!DOCTYPE html>
             background: linear-gradient(to bottom, #f2f2f2, #dcdcdc);
             border-color: #999;
         }
+        [data-theme="dark"] button:hover, [data-theme="dark"] .btn:hover {
+            background: linear-gradient(to bottom, #4a4a4a, #3d3d3d);
+            border-color: #777;
+        }
         .btn-danger {
-            background: linear-gradient(to bottom, #fff5f5, #ffe0e0);
-            border-color: #cc9999;
-            color: #cc0000;
+            background: linear-gradient(to bottom, #fff5f5, #ffe0e0) !important;
+            border-color: #cc9999 !important;
+            color: #cc0000 !important;
+        }
+        [data-theme="dark"] .btn-danger {
+            background: linear-gradient(to bottom, #4a1f1f, #331313) !important;
+            border-color: #6e2e2e !important;
+            color: #ff9999 !important;
         }
         .btn-danger:hover {
-            background: #ffcccc;
+            background: #ffcccc !important;
+        }
+        [data-theme="dark"] .btn-danger:hover {
+            background: #5a2f2f !important;
         }
         .btn-primary {
-            background: linear-gradient(to bottom, #e3f2fd, #bbdefb);
-            border-color: #90caf9;
-            color: #0d47a1;
+            background: linear-gradient(to bottom, #e3f2fd, #bbdefb) !important;
+            border-color: #90caf9 !important;
+            color: #0d47a1 !important;
+            font-weight: bold;
+        }
+        [data-theme="dark"] .btn-primary {
+            background: linear-gradient(to bottom, #1f3a4a, #132533) !important;
+            border-color: #2e5a6e !important;
+            color: #90caf9 !important;
             font-weight: bold;
         }
         .btn-primary:hover {
-            background: #90caf9;
+            background: #90caf9 !important;
+        }
+        [data-theme="dark"] .btn-primary:hover {
+            background: #2e5a6e !important;
+        }
+        .btn-success {
+            background: linear-gradient(to bottom, #f5fff5, #e0ffe0) !important;
+            border-color: #99cc99 !important;
+            color: #00aa00 !important;
+        }
+        [data-theme="dark"] .btn-success {
+            background: linear-gradient(to bottom, #1f4a1f, #133313) !important;
+            border-color: #2e6e2e !important;
+            color: #99ff99 !important;
+        }
+        .btn-success:hover {
+            background: #ccffcc !important;
+        }
+        [data-theme="dark"] .btn-success:hover {
+            background: #2f5a2f !important;
         }
 
         /* 下部ステータス集計バー (Himenos再現) */
         .summary-bar {
-            border-top: 1px solid #b0b0b0;
-            background: #e1e1e1;
+            border-top: 1px solid var(--border-color);
+            background: var(--status-bar-bg);
             display: flex;
             font-size: 11px;
             align-items: stretch;
@@ -1346,7 +1442,7 @@ const htmlTemplate = `<!DOCTYPE html>
             align-items: center;
             justify-content: center;
             width: 100px;
-            color: #000;
+            color: var(--text-color);
             font-weight: bold;
             border-right: 1px solid #b0b0b0;
             text-decoration: none;
@@ -1355,7 +1451,7 @@ const htmlTemplate = `<!DOCTYPE html>
             opacity: 0.8;
         }
         .summary-red { background: #ff4d4d; color: #fff; }
-        .summary-yellow { background: #ffeb3b; color: #000; }
+        .summary-yellow { background: #ffeb3b; color: var(--text-color); }
         .summary-green { background: #4caf50; color: #fff; }
         .summary-blue { background: #2196f3; color: #fff; }
         .summary-count {
@@ -1369,8 +1465,9 @@ const htmlTemplate = `<!DOCTYPE html>
 
         /* 最下部システムステータスバー */
         .status-bar {
-            background: #e1e1e1;
-            border-top: 1px solid #b0b0b0;
+            background: var(--status-bar-bg);
+            border-top: 1px solid var(--border-color);
+            color: var(--text-color);
             padding: 3px 10px;
             font-size: 11px;
             color: #333;
@@ -1387,7 +1484,7 @@ const htmlTemplate = `<!DOCTYPE html>
         .badge { display: inline-block; padding: 1px 4px; border-radius: 2px; font-size: 11px; font-weight: bold; }
         .status-running { background: #2196f3; color: #fff; }
         .status-success { background: #4caf50; color: #fff; }
-        .status-warn { background: #ffeb3b; color: #000; }
+        .status-warn { background: #ffeb3b; color: var(--text-color); }
         .status-error { background: #ff4d4d; color: #fff; }
         .status-hold { background: #9e9e9e; color: #fff; }
 
@@ -1419,17 +1516,18 @@ const htmlTemplate = `<!DOCTYPE html>
             text-align: center;
             box-shadow: 1px 1px 3px rgba(0,0,0,0.1);
         }
-        .flow-node-wait { background: #d3d3d3; color: #333; }
-        .flow-node-run { background: #2196f3; color: #fff; }
-        .flow-node-success { background: #4caf50; color: #fff; }
-        .flow-node-warn { background: #ffeb3b; color: #000; }
-        .flow-node-error { background: #ff4d4d; color: #fff; }
+        .flow-node-wait, .topo-node.flow-node-wait { background: #d3d3d3; color: #333; }
+        .flow-node-run, .topo-node.flow-node-run { background: #2196f3; color: #fff; }
+        .flow-node-success, .topo-node.flow-node-success { background: #4caf50; color: #fff; }
+        .flow-node-warn, .topo-node.topo-warn, .topo-node.flow-node-warn { background: #ffeb3b; color: var(--text-color); }
+        .flow-node-error, .topo-node.flow-node-error { background: #ff4d4d; color: #fff; }
+        .flow-node-unknown, .topo-node.flow-node-unknown { background: #9e9e9e; color: #fff; }
         .flow-arrow { font-size: 16px; font-weight: bold; color: #666; }
 
         /* トポロジー監視マップ用スタイル */
         .topology-map {
             background: #ffffff;
-            border: 1px solid #ccc;
+            border: 1px solid var(--border-color);
             padding: 20px;
             font-family: monospace;
             white-space: pre;
@@ -1447,12 +1545,12 @@ const htmlTemplate = `<!DOCTYPE html>
         }
         .topo-node a {
             text-decoration: none;
-            color: #000;
+            color: inherit;
         }
-        .topo-ok { background: #4caf50; color: #fff; }
-        .topo-err { background: #ff4d4d; color: #fff; }
-        .topo-warn { background: #ffeb3b; color: #000; }
-        .topo-unknown { background: #2196f3; color: #fff; }
+        .topo-node.topo-ok { background: #4caf50; color: #fff; }
+        .topo-node.topo-err { background: #ff4d4d; color: #fff; }
+        .topo-node.topo-warn { background: #ffeb3b; color: var(--text-color); }
+        .topo-node.topo-unknown { background: #2196f3; color: #fff; }
 
         /* 3分割画面レイアウト用 */
         .split-layout {
@@ -1462,11 +1560,11 @@ const htmlTemplate = `<!DOCTYPE html>
             height: 100%;
             width: 100%;
             flex: 1;
-            overflow-y: auto;
+            overflow: hidden;
         }
         .split-section {
-            background: #ffffff;
-            border: 1px solid #b0b0b0;
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
             display: flex;
             flex-direction: column;
             box-sizing: border-box;
@@ -1525,6 +1623,16 @@ const htmlTemplate = `<!DOCTYPE html>
             from { opacity: 0; transform: translateY(-20px); }
             to { opacity: 1; transform: translateY(0); }
         }
+    
+        /* ダークモード時の自動補完背景色対策 */
+        [data-theme="dark"] input:-webkit-autofill,
+        [data-theme="dark"] input:-webkit-autofill:hover, 
+        [data-theme="dark"] input:-webkit-autofill:focus {
+            -webkit-text-fill-color: #e0e0e0 !important;
+            -webkit-box-shadow: 0 0 0px 1000px #2d2d2d inset !important;
+            transition: background-color 5000s ease-in-out 0s;
+        }
+
     </style>
     <script>
         function updateScheduleForm() {
@@ -1641,13 +1749,218 @@ const htmlTemplate = `<!DOCTYPE html>
             }
         }
     </script>
+<script>
+        function toggleDarkMode() {
+            const currentTheme = document.documentElement.getAttribute('data-theme');
+            const targetTheme = currentTheme === 'dark' ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-theme', targetTheme);
+            localStorage.setItem('theme', targetTheme);
+            updateThemeButtonLabel(targetTheme);
+        }
+
+        function updateThemeButtonLabel(theme) {
+            const btn = document.getElementById('theme_btn');
+            if (!btn) return;
+            const isEn = localStorage.getItem('lang') === 'en';
+            if (theme === 'dark') {
+                btn.innerHTML = isEn ? '☀️ Light Mode' : '☀️ ライトモード';
+            } else {
+                btn.innerHTML = isEn ? '🌙 Dark Mode' : '🌙 ダークモード';
+            }
+        }
+
+        // 初期ロード時のダークモード適用
+        (function() {
+            const savedTheme = localStorage.getItem('theme') || 'light';
+            document.documentElement.setAttribute('data-theme', savedTheme);
+            window.addEventListener('DOMContentLoaded', () => {
+                updateThemeButtonLabel(savedTheme);
+            });
+        })();
+
+        // 多言語翻訳
+        const translations = {
+            ja: {
+                "jobs_manage": "📋 ジョブ管理",
+                "nodes_manage": "🖥️ ノード・監視",
+                "env_settings": "⚙️ 環境構築",
+                "job_def_list": "ジョブ定義[一覧]",
+                "real_script_list": "📁 実スクリプトファイル一覧",
+                "job_def_detail": "ジョブ定義[詳細]",
+                "job_history": "📊 ジョブ履歴",
+                "session_detail": "セッション詳細",
+                "schedule_list": "📅 スケジュール一覧",
+                "schedule_add": "➕ スケジュール追加",
+                "script_edit_title": "スクリプトファイルの直接編集",
+                "script_path_lbl": "スクリプトパス:",
+                "script_body_lbl": "スクリプト本文 (Git連携):",
+                "btn_save": "💾 保存",
+                "btn_cancel": "キャンセル",
+                "settings_title": "環境構築 (通知設定 & バックアップ)",
+                "settings_en_de": "💾 Himenos設定のインポート / エクスポート (YAML形式)",
+                "settings_en_de_help": "すべての設定を一括バックアップ・復元できます。",
+                "settings_export_btn": "📤 設定のエクスポート (himenos_backup.yaml ダウンロード)",
+                "settings_import_lbl": "📥 設定のインポート (YAMLファイルをアップロード):",
+                "settings_import_btn": "インポート実行",
+                "settings_notify_title": "共通デフォルト通知設定",
+                "settings_notify_lbl": "デフォルトの通知方法:",
+                "settings_notify_opt_none": "通知しない",
+                "settings_notify_opt_both": "メール & Slack 両方",
+                "settings_notify_opt_slack": "Slack のみ",
+                "settings_notify_opt_email": "メール のみ",
+                "settings_notify_help": "※ 個別ジョブや監視で「デフォルト設定に従う」を選択した際、この設定が適用されます。",
+                "settings_slack_title": "Slack 通知設定",
+                "settings_smtp_title": "メール通知設定 (SMTP)",
+                "settings_smtp_host": "SMTP サーバホスト名:",
+                "settings_smtp_host_help": "※ 空欄の場合は、通知をシミュレートして標準ログへ出力します。",
+                "settings_smtp_port": "SMTP ポート番号:",
+                "settings_smtp_user": "SMTP ユーザ名:",
+                "settings_smtp_pass": "SMTP パスワード:",
+                "settings_smtp_from": "送信元アドレス (From):",
+                "settings_smtp_to": "送信先アドレス (To):",
+                "settings_save_btn": "💾 設定を保存",
+                "settings_test_btn": "⚡ テスト送信",
+                "sec_title": "🔒 セキュリティ設定",
+                "sec_auth_title": "Basic認証 アカウント管理",
+                "sec_ip_title": "接続許可IP制限管理",
+                "sec_lbl_user": "ユーザー名:",
+                "sec_lbl_pass": "パスワード:",
+                "sec_btn_add": "➕ アカウント追加",
+                "sec_ip_lbl": "接続許可IP / CIDR:",
+                "sec_btn_ip_add": "➕ 制限追加",
+                "sec_enable_ip": "IP制限を有効にする",
+                "sec_btn_apply": "💾 設定適用",
+                "sec_ip_rescue_help": "※ IP制限が有効な場合でも、ローカルホスト（127.0.0.1, ::1, localhost）からのアクセスは常に制限チェックから除外（救済許可）されます。これにより、誤ったIPアドレスを登録してしまい、管理者が自分自身でサーバーに二度とアクセスできなくなってしまう締め出し事故を完全に防ぎます。"
+            },
+            en: {
+                "jobs_manage": "📋 Jobs",
+                "nodes_manage": "🖥️ Nodes & Monitors",
+                "env_settings": "⚙️ Settings",
+                "job_def_list": "Job Definitions",
+                "real_script_list": "📁 Real Scripts",
+                "job_def_detail": "Job Details",
+                "job_history": "📊 Job History",
+                "session_detail": "Session Detail",
+                "schedule_list": "📅 Schedules",
+                "schedule_add": "➕ Add Schedule",
+                "script_edit_title": "Direct Script Editor",
+                "script_path_lbl": "Script Path:",
+                "script_body_lbl": "Script Content (Git Linked):",
+                "btn_save": "💾 Save",
+                "btn_cancel": "Cancel",
+                "settings_title": "Settings (Notifications & Backup)",
+                "settings_en_de": "💾 Himenos Settings Import / Export (YAML)",
+                "settings_en_de_help": "Backup and restore all settings at once.",
+                "settings_export_btn": "📤 Export Settings (Download yaml)",
+                "settings_import_lbl": "📥 Import Settings (Upload yaml file):",
+                "settings_import_btn": "Execute Import",
+                "settings_notify_title": "Global Default Notifications",
+                "settings_notify_lbl": "Default Notify Method:",
+                "settings_notify_opt_none": "Do not notify",
+                "settings_notify_opt_both": "Both Email & Slack",
+                "settings_notify_opt_slack": "Slack Only",
+                "settings_notify_opt_email": "Email Only",
+                "settings_notify_help": "* Applied when 'Default' is selected in individual jobs or monitors.",
+                "settings_slack_title": "Slack Notifications",
+                "settings_smtp_title": "Email Notifications (SMTP)",
+                "settings_smtp_host": "SMTP Host Name:",
+                "settings_smtp_host_help": "* If empty, SMTP notification is mocked and output to standard log.",
+                "settings_smtp_port": "SMTP Port Number:",
+                "settings_smtp_user": "SMTP User Name:",
+                "settings_smtp_pass": "SMTP Password:",
+                "settings_smtp_from": "Sender Address (From):",
+                "settings_smtp_to": "Recipient Address (To):",
+                "settings_save_btn": "💾 Save Settings",
+                "settings_test_btn": "⚡ Test Send",
+                "sec_title": "🔒 Security Settings",
+                "sec_auth_title": "Basic Auth Accounts",
+                "sec_ip_title": "Allowed IPs / CIDR Restriction",
+                "sec_lbl_user": "Username:",
+                "sec_lbl_pass": "Password:",
+                "sec_btn_add": "➕ Add User",
+                "sec_ip_lbl": "Allowed IP / CIDR:",
+                "sec_btn_ip_add": "➕ Add IP Restriction",
+                "sec_enable_ip": "Enable IP Restriction",
+                "sec_btn_apply": "💾 Apply Settings",
+                "sec_ip_rescue_help": "* Localhost (127.0.0.1, ::1, localhost) is always allowed even if IP restriction is enabled, preventing accidental lockout of the administrator."
+            }
+        };
+
+        function toggleLanguage() {
+            const currentLang = localStorage.getItem('lang') || 'ja';
+            const targetLang = currentLang === 'ja' ? 'en' : 'ja';
+            localStorage.setItem('lang', targetLang);
+            applyLanguage(targetLang);
+        }
+
+                        function translateTextNodes(node, lang) {
+            if (node.nodeType === 3) {
+                let txt = node.nodeValue;
+                if (!txt || txt.trim() === "") return;
+                if (lang === 'en') {
+                    txt = txt.replace(/正常終了/g, 'Success')
+                             .replace(/異常終了/g, 'Abnormal')
+                             .replace(/警告終了/g, 'Warning')
+                             .replace(/実行中/g, 'Running')
+                             .replace(/正常/g, 'Normal')
+                             .replace(/異常/g, 'Abnormal')
+                             .replace(/未判定/g, 'Pending')
+                             .replace(/未実施/g, 'Not Run')
+                             .replace(/不明/g, 'Unknown');
+                } else {
+                    txt = txt.replace(/Success/g, '正常終了')
+                             .replace(/Abnormal/g, '異常終了')
+                             .replace(/Warning/g, '警告終了')
+                             .replace(/Running/g, '実行中')
+                             .replace(/Normal/g, '正常')
+                             .replace(/Pending/g, '未判定')
+                             .replace(/Not Run/g, '未実施')
+                             .replace(/Unknown/g, '不明');
+                }
+                node.nodeValue = txt;
+            } else {
+                if (node.tagName === 'SCRIPT' || node.tagName === 'STYLE' || node.tagName === 'TEXTAREA' || node.tagName === 'INPUT') return;
+                node.childNodes.forEach(child => translateTextNodes(child, lang));
+            }
+        }
+
+        function applyLanguage(lang) {
+            document.querySelectorAll('[data-i18n]').forEach(el => {
+                const key = el.getAttribute('data-i18n');
+                if (translations[lang] && translations[lang][key]) {
+                    el.innerHTML = translations[lang][key];
+                }
+            });
+            
+            translateTextNodes(document.body, lang);
+
+            const langBtn = document.getElementById('lang_btn');
+            if (langBtn) {
+                langBtn.innerHTML = lang === 'ja' ? '🌐 English' : '🌐 日本語';
+            }
+            const currentTheme = document.documentElement.getAttribute('data-theme') || 'light';
+            updateThemeButtonLabel(currentTheme);
+        }
+
+        // 初期ロード時の言語適用
+        window.addEventListener('DOMContentLoaded', () => {
+            const savedLang = localStorage.getItem('lang') || 'ja';
+            applyLanguage(savedLang);
+        });
+    </script>
 </head>
 <body>
 
-<div class="toolbar">
-    <a href="/?tab=jobs" class="tool-btn {{if or (eq .CurrentTab "jobs") (eq .CurrentTab "history") (eq .CurrentTab "schedules") (eq .CurrentTab "script_edit") (eq .CurrentTab "job_new") (eq .CurrentTab "job_edit")}}tool-active{{end}}">📋 ジョブ管理</a>
-    <a href="/?tab=nodes" class="tool-btn {{if or (eq .CurrentTab "nodes") (eq .CurrentTab "topology") (eq .CurrentTab "monitors") (eq .CurrentTab "nodes_manage") (eq .CurrentTab "node_new")}}tool-active{{end}}">🖥️ ノード・監視</a>
-    <a href="/?tab=settings" class="tool-btn {{if eq .CurrentTab "settings"}}tool-active{{end}}">⚙️ 環境構築</a>
+<div class="toolbar" style="justify-content: space-between;">
+    <div style="display: flex; gap: 5px; align-items: center;">
+        <a href="/?tab=jobs" class="tool-btn {{if or (eq .CurrentTab "jobs") (eq .CurrentTab "history") (eq .CurrentTab "schedules") (eq .CurrentTab "script_edit") (eq .CurrentTab "job_new") (eq .CurrentTab "job_edit")}}tool-active{{end}}"><span data-i18n="jobs_manage">📋 ジョブ管理</span></a>
+        <a href="/?tab=nodes" class="tool-btn {{if or (eq .CurrentTab "nodes") (eq .CurrentTab "topology") (eq .CurrentTab "monitors") (eq .CurrentTab "nodes_manage") (eq .CurrentTab "node_new")}}tool-active{{end}}"><span data-i18n="nodes_manage">🖥️ ノード・監視</span></a>
+        <a href="/?tab=settings" class="tool-btn {{if eq .CurrentTab "settings"}}tool-active{{end}}"><span data-i18n="env_settings">⚙️ 環境構築</span></a>
+    </div>
+    <div style="display: flex; gap: 5px; align-items: center; margin-left: auto; padding-right: 10px;">
+        <button onclick="toggleLanguage()" class="btn" style="font-size: 11px; padding: 2px 8px; font-weight: bold; background: var(--panel-bg); color: var(--text-color); cursor: pointer;" id="lang_btn">🌐 English</button>
+        <button onclick="toggleDarkMode()" class="btn" style="font-size: 11px; padding: 2px 8px; font-weight: bold; background: var(--panel-bg); color: var(--text-color); cursor: pointer;" id="theme_btn">🌓 Dark Mode</button>
+    </div>
 </div>
 
 <div class="container">
@@ -1655,12 +1968,12 @@ const htmlTemplate = `<!DOCTYPE html>
         <!-- ジョブ管理 統合画面 -->
         <div class="split-layout">
             <!-- 1. ジョブ設定セクション -->
-            <div class="split-section" style="min-height: 400px; display: flex; flex-direction: row; gap: 5px; height: 450px;">
+            <div class="split-section" style="flex: 1.3; min-height: 200px; display: flex; flex-direction: row; gap: 5px; box-sizing: border-box; overflow: hidden;">
                  <!-- 左ペイン：ジョブツリー -->
                  <div class="pane-left" style="flex: 1; border: none; height: 100%; box-sizing: border-box; overflow-y: auto;">
                      <div class="view-title">
-                         <span>ジョブ定義[一覧]</span>
-                         <a href="/?tab=jobs{{if .SelectedJobID}}&s={{.SelectedJobID}}{{end}}" class="refresh-icon">🔄 更新</a>
+                         <span data-i18n="job_def_list">ジョブ定義[一覧]</span>
+                         <a href="/?tab=jobs{{if .SelectedJobID}}&s={{.SelectedJobID}}{{end}}" class="refresh-icon"><span data-i18n="btn_update">🔄 更新</span></a>
                      </div>
                      <div class="view-content">
                          <div style="margin-bottom: 10px; display: flex; gap: 5px;">
@@ -1676,9 +1989,7 @@ const htmlTemplate = `<!DOCTYPE html>
                          {{end}}
 
                          <h4 style="margin-top:20px; border-bottom:1px solid #ccc; padding-bottom:3px;">📁 実スクリプトファイル一覧</h4>
-                         <div class="tree-node">
-                             📁 scripts
-                         </div>
+                         <div class="tree-node">📁 scripts</div>
                          {{range .ScriptFiles}}
                              <div class="tree-node">{{.Prefix}}📝 <a href="/?tab=script_edit&file={{.Path}}" class="tree-link">{{if .IsEnabled}}{{.Name}}{{else}}<span style="text-decoration: line-through; color: #888;">{{.Name}} (無効化中)</span>{{end}}</a></div>
                          {{else}}
@@ -1693,8 +2004,11 @@ const htmlTemplate = `<!DOCTYPE html>
                           <div class="view-title"><span>新規作成 ({{if eq .NewNodeType "unit"}}ユニット{{else if eq .NewNodeType "net"}}ネット{{else}}ジョブ{{end}})</span></div>
                           <div class="view-content">
                               {{if .ErrorMessage}}
-                                  <div class="error-message">{{.ErrorMessage}}</div>
-                              {{end}}
+                    <div class="error-message" style="background:#ffdddd; color:#cc0000; border:1px solid #ffbbbb; padding:10px; border-radius:4px; margin-bottom:15px; font-weight:bold; font-size:12px;">⚠️ {{.ErrorMessage}}</div>
+                {{end}}
+                {{if .SuccessMessage}}
+                    <div class="success-message" style="background:#ddffdd; color:#00aa00; border:1px solid #bbffbb; padding:10px; border-radius:4px; margin-bottom:15px; font-weight:bold; font-size:12px;">✅ {{.SuccessMessage}}</div>
+                {{end}}
                               <form action="/action" method="POST">
                                   <input type="hidden" name="action" value="create_job">
                                   <input type="hidden" name="type" value="{{.NewNodeType}}">
@@ -1751,8 +2065,11 @@ const htmlTemplate = `<!DOCTYPE html>
                           <div class="view-title"><span>ジョブ定義編集: {{.SelectedNode.Name}}</span></div>
                           <div class="view-content">
                               {{if .ErrorMessage}}
-                                  <div class="error-message">{{.ErrorMessage}}</div>
-                              {{end}}
+                    <div class="error-message" style="background:#ffdddd; color:#cc0000; border:1px solid #ffbbbb; padding:10px; border-radius:4px; margin-bottom:15px; font-weight:bold; font-size:12px;">⚠️ {{.ErrorMessage}}</div>
+                {{end}}
+                {{if .SuccessMessage}}
+                    <div class="success-message" style="background:#ddffdd; color:#00aa00; border:1px solid #bbffbb; padding:10px; border-radius:4px; margin-bottom:15px; font-weight:bold; font-size:12px;">✅ {{.SuccessMessage}}</div>
+                {{end}}
                               <form action="/action" method="POST">
                                   <input type="hidden" name="action" value="update_job">
                                   <input type="hidden" name="id" value="{{.SelectedNode.ID}}">
@@ -1790,56 +2107,67 @@ const htmlTemplate = `<!DOCTYPE html>
                               </form>
                           </div>
                      {{else if eq .CurrentTab "script_edit"}}
-                          <div class="view-title"><span>スクリプトファイルの直接編集: {{.SelectedJobID}}</span></div>
+                          <div class="view-title"><span><span data-i18n="script_edit_title">スクリプトファイルの直接編集</span>: {{.SelectedJobID}}</span></div>
                           <div class="view-content">
                               {{if .ErrorMessage}}
-                                  <div class="error-message">{{.ErrorMessage}}</div>
-                              {{end}}
-                              <form action="/action" method="POST">
-                                  <input type="hidden" name="action" value="save_script_only">
-                                  <input type="hidden" name="filepath" value="{{.SelectedJobID}}">
+                    <div class="error-message" style="background:#ffdddd; color:#cc0000; border:1px solid #ffbbbb; padding:10px; border-radius:4px; margin-bottom:15px; font-weight:bold; font-size:12px;">⚠️ {{.ErrorMessage}}</div>
+                {{end}}
+                {{if .SuccessMessage}}
+                    <div class="success-message" style="background:#ddffdd; color:#00aa00; border:1px solid #bbffbb; padding:10px; border-radius:4px; margin-bottom:15px; font-weight:bold; font-size:12px;">✅ {{.SuccessMessage}}</div>
+                {{end}}
+                              <form action="/action" method="POST" style="margin: 0;">
+                                   <input type="hidden" name="action" value="save_script_only">
+                                   <input type="hidden" name="filepath" value="{{.SelectedJobID}}">
+                                   
+                                   <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 4px;">
+                                       <span style="font-weight: bold; font-size: 11px; white-space: nowrap;" data-i18n="script_path_lbl">スクリプトパス:</span>
+                                       <input type="text" value="{{.SelectedJobID}}" readonly style="background:#e0e0e0; cursor:not-allowed; flex: 1; font-size: 11px; padding: 2px;">
+                                   </div>
 
-                                  <label>スクリプトパス:</label>
-                                  <input type="text" value="{{.SelectedJobID}}" readonly style="background:#e0e0e0; cursor:not-allowed; width:50%;">
+                                   <label style="margin-top:2px; margin-bottom:2px; font-size:11px; font-weight: bold;" data-i18n="script_body_lbl">スクリプト本文 (Git連携):</label>
+                                   <textarea name="script_content" rows="6" style="width:100%; height: 110px; font-family: monospace; font-size: 11px; box-sizing: border-box;">{{.ScriptContent}}</textarea>
 
-                                  <label>スクリプト本文 (Git連携):</label>
-                                  <textarea name="script_content" rows="15" style="width:100%;">{{.ScriptContent}}</textarea>
+                                   <div style="margin-top:4px; display: flex; gap: 5px; align-items: center;">
+                                       <button type="submit" style="padding: 2px 8px; font-size: 11px;">💾 ファイル保存</button>
+                                       <a href="/?tab=jobs" class="btn" style="padding: 2px 8px; font-size: 11px;">キャンセル</a>
+                                   </div>
+                               </form>
 
-                                  <div style="margin-top:10px;">
-                                      <button type="submit">💾 ファイル保存</button>
-                                      <a href="/?tab=jobs" class="btn">キャンセル</a>
-                                  </div>
-                              </form>
+                               <div style="margin-top: 8px; border-top: 1px dashed #ccc; padding-top: 6px; display: flex; gap: 10px; align-items: flex-start;">
+                                   <!-- 左：スクリプト状態切り替え -->
+                                   <div style="flex: 1;">
+                                       <form action="/action" method="POST" style="margin: 0;">
+                                           <input type="hidden" name="action" value="toggle_script">
+                                           <input type="hidden" name="file" value="{{.SelectedJobID}}">
+                                           {{if .SelectedScriptEnabled}}
+                                               <button type="submit" class="btn btn-danger" style="background: #dc3545; color: white; border-color: #dc3545; width: 100%; padding: 2px 8px; font-size: 11px;">🚫 スクリプト無効化</button>
+                                           {{else}}
+                                               <button type="submit" class="btn btn-success" style="background: #28a745; color: white; border-color: #28a745; width: 100%; padding: 2px 8px; font-size: 11px;">✅ スクリプト有効化</button>
+                                           {{end}}
+                                       </form>
+                                   </div>
 
-                              <form action="/action" method="POST" style="margin-top: 15px; border-top: 1px dashed #ccc; padding-top: 15px;">
-                                  <input type="hidden" name="action" value="toggle_script">
-                                  <input type="hidden" name="file" value="{{.SelectedJobID}}">
-                                  {{if .SelectedScriptEnabled}}
-                                      <button type="submit" class="btn btn-danger">🚫 実スクリプトを無効化する</button>
-                                  {{else}}
-                                      <button type="submit" class="btn btn-success" style="background-color: #28a745; color: white;">✅ 実スクリプトを有効化する</button>
-                                  {{end}}
-                              </form>
-
-                              <div style="margin-top:20px; padding:10px; background:#f9f9f9; border:1px solid #ccc;">
-                                  <h4>このスクリプトにバインドされているジョブ</h4>
-                                  {{if .SelectedNode}}
-                                      <p>ジョブ: <strong>{{.SelectedNode.Name}}</strong> で設定されています。</p>
-                                      <div style="display: flex; gap: 5px; align-items: center;">
-                                          <form action="/action" method="POST" style="margin:0;">
-                                              <input type="hidden" name="action" value="run_job">
-                                              <input type="hidden" name="id" value="{{.SelectedNode.ID}}">
-                                              <button type="submit">⚡ ジョブの実行</button>
-                                          </form>
-                                          <a href="/?tab=jobs&s={{.SelectedNode.ID}}" class="btn">ジョブ定義を表示</a>
-                                      </div>
-                                  {{else}}
-                                      <p style="color:#666;">このスクリプトを参照している有効なジョブは現在ありません。</p>
-                                  {{end}}
-                              </div>
-                          </div>
+                                   <!-- 右：バインドされているジョブ -->
+                                   <div style="flex: 1.5; padding: 4px 6px; background:#f9f9f9; border:1px solid #ccc; border-radius: 4px; box-sizing: border-box; min-height: 48px; font-size: 11px;">
+                                       <span style="font-weight: bold;">🔗 バインド先ジョブ:</span>
+                                       {{if .SelectedNode}}
+                                           <strong>{{.SelectedNode.Name}}</strong>
+                                           <div style="display: flex; gap: 3px; align-items: center; margin-top: 2px;">
+                                               <form action="/action" method="POST" style="margin:0;">
+                                                   <input type="hidden" name="action" value="run_job">
+                                                   <input type="hidden" name="id" value="{{.SelectedNode.ID}}">
+                                                   <button type="submit" style="font-size: 10px; padding: 1px 4px;">⚡ 実行</button>
+                                               </form>
+                                               <a href="/?tab=jobs&s={{.SelectedNode.ID}}" class="btn" style="font-size: 10px; padding: 1px 4px;">表示</a>
+                                           </div>
+                                       {{else}}
+                                           <span style="color:#666;">なし</span>
+                                       {{end}}
+                                   </div>
+                               </div>
+                           </div>
                      {{else}}
-                          <div class="view-title"><span>ジョブ定義[詳細]</span></div>
+                          <div class="view-title"><span data-i18n="job_def_detail">ジョブ定義[詳細]</span></div>
                           <div class="view-content">
                               {{if .SelectedNode}}
                                   <h3>{{.SelectedNode.Name}}</h3>
@@ -1893,11 +2221,11 @@ const htmlTemplate = `<!DOCTYPE html>
             </div>
 
             <!-- 2. ジョブ履歴セクション -->
-            <div class="split-section" style="min-height: 250px; display: flex; flex-direction: row; gap: 5px; height: 300px;">
+            <div class="split-section" style="flex: 1; min-height: 150px; display: flex; flex-direction: row; gap: 5px; box-sizing: border-box; overflow: hidden;">
                  <div style="flex: 3; overflow-y: auto; padding: 10px; border-right: 1px solid #ccc; height: 100%; box-sizing: border-box;">
                      <div class="view-title" style="margin: -10px -10px 10px -10px;">
-                         <span>📊 ジョブ履歴</span>
-                         <a href="/?tab=jobs" class="refresh-icon">🔄 更新</a>
+                         <span data-i18n="job_history">📊 ジョブ履歴</span>
+                         <a href="/?tab=jobs" class="refresh-icon"><span data-i18n="btn_update">🔄 更新</span></a>
                      </div>
                      <form action="/" method="GET" style="display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px; font-size:12px;">
                          <input type="hidden" name="tab" value="{{$.CurrentTab}}">
@@ -1907,7 +2235,7 @@ const htmlTemplate = `<!DOCTYPE html>
                          <span>～</span>
                          <input type="date" name="end_date" value="{{.HistoryEndDate}}" style="padding:2px; font-size:12px;">
                          <button type="submit" style="padding:2px 8px; font-size:12px;">検索</button>
-                         <a href="/?tab=jobs" style="padding:2px; font-size:12px;">クリア</a>
+                         <a href="/?tab=jobs" style="padding:2px; font-size:12px;"><span data-i18n="btn_clear">クリア</span></a>
                      </form>
 
                      <table border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:12px;">
@@ -1927,7 +2255,7 @@ const htmlTemplate = `<!DOCTYPE html>
                                      <td>{{.StartDate}}</td>
                                      <td>
                                          {{if eq .Status "正常終了"}}<span class="badge status-success">正常終了</span>
-                                         {{else if eq .Status "異常終了"}}<span class="badge status-danger">異常終了</span>
+                                         {{else if eq .Status "異常終了"}}<span class="badge status-error">異常終了</span>
                                          {{else if eq .Status "警告終了"}}<span class="badge status-hold">警告終了</span>
                                          {{else}}<span class="badge status-run">実行中</span>{{end}}
                                      </td>
@@ -1941,29 +2269,21 @@ const htmlTemplate = `<!DOCTYPE html>
 
                  <div style="flex: 2; overflow-y: auto; padding: 10px; height: 100%; box-sizing: border-box;">
                      {{if .SelectedSession}}
-                         <div class="view-title" style="margin: -10px -10px 10px -10px;"><span>セッション詳細: {{.SelectedSessionID}}</span></div>
+                         <div class="view-title" style="margin: -10px -10px 10px -10px;"><span><span data-i18n="session_detail">セッション詳細</span>: {{.SelectedSessionID}}</span></div>
                          <div style="font-size:12px; margin-bottom:10px;">
                              <strong>全体状態:</strong> 
                              {{if eq .SelectedSession.Status "正常終了"}}<span class="badge status-success">正常終了</span>
-                             {{else if eq .SelectedSession.Status "異常終了"}}<span class="badge status-danger">異常終了</span>
+                             {{else if eq .SelectedSession.Status "異常終了"}}<span class="badge status-error">異常終了</span>
                              {{else if eq .SelectedSession.Status "警告終了"}}<span class="badge status-hold">警告終了</span>
                              {{else}}<span class="badge status-run">実行中</span>{{end}}
                              (正常: {{.GreenCount}} / 警告: {{.YellowCount}} / 異常: {{.RedCount}} / 合計: {{.TotalCount}})
                          </div>
 
-                         <div class="topology-map" style="padding:10px; font-size:11px; margin-bottom:10px; max-height:120px; overflow-y:auto;">
-                             {{range .SessionNodes}}
-                                 <span class="topo-node {{if eq .Node.Status "実行中"}}flow-node-run{{else if eq .Node.Status "未実施"}}flow-node-unknown{{else if eq .Node.Status "起動失敗"}}flow-node-error{{else if eq .StatusLabel "正常終了"}}flow-node-success{{else if eq .StatusLabel "警告終了"}}flow-node-warn{{else if eq .StatusLabel "異常終了"}}flow-node-error{{else}}flow-node-success{{end}}">
-                                     <a href="/?tab={{$.CurrentTab}}&session_id={{$.SelectedSessionID}}&show_log={{.Node.JobID}}{{if $.SelectedJobID}}&s={{$.SelectedJobID}}{{end}}" style="color:inherit;">{{.Node.Name}} [{{if eq .Node.Status "終了"}}{{.StatusLabel}}{{else}}{{.Node.Status}}{{end}}]</a>
-                                 </span>
-                                 <span class="flow-arrow">→</span>
-                             {{end}}
-                             <span>完了</span>
-                         </div>
+                         <div class="topology-map" style="padding:10px; font-size:11px; margin-bottom:10px; max-height:120px; overflow-y:auto; white-space: normal;">{{range .SessionNodes}}<span class="topo-node {{if eq .Node.Status "実行中"}}flow-node-run{{else if eq .Node.Status "未実施"}}flow-node-unknown{{else if eq .Node.Status "起動失敗"}}flow-node-error{{else if eq .StatusLabel "正常終了"}}flow-node-success{{else if eq .StatusLabel "警告終了"}}flow-node-warn{{else if eq .StatusLabel "異常終了"}}flow-node-error{{else}}flow-node-success{{end}}"><a href="/?tab={{$.CurrentTab}}&session_id={{$.SelectedSessionID}}&show_log={{.Node.JobID}}{{if $.SelectedJobID}}&s={{$.SelectedJobID}}{{end}}" style="color:inherit;">{{.Node.Name}} [{{if eq .Node.Status "終了"}}{{.StatusLabel}}{{else}}{{.Node.Status}}{{end}}]</a></span><span class="flow-arrow"> → </span>{{end}}<span>完了</span></div>
 
                          {{if .ShowLogNode}}
                              <h5 style="margin:5px 0;">ログ: {{.ShowLogNode.Name}} (終了コード: {{.ShowLogNode.ExitValue}})</h5>
-                             <textarea readonly rows="6" style="width:100%; font-family:monospace; font-size:11px; background:#fafafa;">{{.ShowLogNode.LogOutput}}</textarea>
+                             <textarea readonly rows="6" style="width:100%; font-family:monospace; font-size:11px; background:#fafafa;">{{.ShowLogNode.Log}}</textarea>
                          {{else}}
                              <p style="color:#666; font-size:11px;">フロー内のジョブ名をクリックすると実行ログが表示されます。</p>
                          {{end}}
@@ -1974,11 +2294,11 @@ const htmlTemplate = `<!DOCTYPE html>
             </div>
 
             <!-- 3. スケジュール設定セクション -->
-            <div class="split-section" style="min-height: 300px; display: flex; flex-direction: row; gap: 5px; height: 350px; overflow-y: auto;">
+            <div class="split-section" style="flex: 1; min-height: 150px; display: flex; flex-direction: row; gap: 5px; box-sizing: border-box; overflow: hidden;">
                  <div style="flex: 1.5; padding: 10px; border-right: 1px solid #ccc; height: 100%; box-sizing: border-box; overflow-y: auto;">
                      <div class="view-title" style="margin: -10px -10px 10px -10px;">
-                         <span>📅 スケジュール一覧</span>
-                         <a href="/?tab=jobs" class="refresh-icon">🔄 更新</a>
+                         <span data-i18n="schedule_list">📅 スケジュール一覧</span>
+                         <a href="/?tab=jobs" class="refresh-icon"><span data-i18n="btn_update">🔄 更新</span></a>
                      </div>
                      <table border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:12px;">
                          <thead>
@@ -1987,7 +2307,7 @@ const htmlTemplate = `<!DOCTYPE html>
                                  <th>実行対象ユニット/ジョブ</th>
                                  <th>設定</th>
                                  <th>状態</th>
-                                 <th>操作</th>
+                                 <th data-i18n="th_operation">操作</th>
                              </tr>
                          </thead>
                          <tbody>
@@ -2023,7 +2343,7 @@ const htmlTemplate = `<!DOCTYPE html>
                                          <form action="/action" method="POST" style="display:inline;">
                                              <input type="hidden" name="action" value="delete_schedule">
                                              <input type="hidden" name="id" value="{{.ID}}">
-                                             <button type="submit" class="btn btn-danger">削除</button>
+                                             <button type="submit" class="btn btn-danger" data-i18n="btn_delete">削除</button>
                                          </form>
                                      </td>
                                  </tr>
@@ -2044,7 +2364,7 @@ const htmlTemplate = `<!DOCTYPE html>
                  </div>
 
                  <div style="flex: 1; padding: 10px; height: 100%; box-sizing: border-box; overflow-y: auto; font-size:12px;">
-                     <div class="view-title" style="margin: -10px -10px 10px -10px;"><span>➕ スケジュール追加</span></div>
+                     <div class="view-title" style="margin: -10px -10px 10px -10px;"><span data-i18n="schedule_add">➕ スケジュール追加</span></div>
                      <form action="/action" method="POST">
                          <input type="hidden" name="action" value="create_schedule">
                          
@@ -2058,15 +2378,15 @@ const htmlTemplate = `<!DOCTYPE html>
                              {{end}}
                          </select>
 
-                         <label style="margin-top:5px;">設定タイプ:</label>
-                         <div style="display: flex; flex-direction: column; gap: 2px; margin-bottom: 5px;">
-                             <label style="font-weight:normal; margin-top:2px; font-size:12px;"><input type="radio" name="type" value="cron" checked onclick="updateScheduleForm()"> crontab形式</label>
-                             <label style="font-weight:normal; margin-top:2px; font-size:12px;"><input type="radio" name="type" value="daily" onclick="updateScheduleForm()"> 毎日</label>
-                             <label style="font-weight:normal; margin-top:2px; font-size:12px;"><input type="radio" name="type" value="weekly" onclick="updateScheduleForm()"> 毎週</label>
-                             <label style="font-weight:normal; margin-top:2px; font-size:12px;"><input type="radio" name="type" value="hourly" onclick="updateScheduleForm()"> 毎時</label>
-                             <label style="font-weight:normal; margin-top:2px; font-size:12px;"><input type="radio" name="type" value="interval" onclick="updateScheduleForm()"> 一定間隔</label>
-                             <label style="font-weight:normal; margin-top:2px; font-size:12px;"><input type="radio" name="type" value="datetime" onclick="updateScheduleForm()"> 日時指定</label>
-                         </div>
+                         <label style="margin-top:4px; margin-bottom:2px;">設定タイプ:</label>
+                          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-bottom: 4px;">
+                              <label style="font-weight:normal; margin-top:0; font-size:11px; display: flex; align-items: center; gap: 2px;"><input type="radio" name="type" value="cron" checked onclick="updateScheduleForm()"> crontab</label>
+                              <label style="font-weight:normal; margin-top:0; font-size:11px; display: flex; align-items: center; gap: 2px;"><input type="radio" name="type" value="daily" onclick="updateScheduleForm()"> 毎日</label>
+                              <label style="font-weight:normal; margin-top:0; font-size:11px; display: flex; align-items: center; gap: 2px;"><input type="radio" name="type" value="weekly" onclick="updateScheduleForm()"> 毎週</label>
+                              <label style="font-weight:normal; margin-top:0; font-size:11px; display: flex; align-items: center; gap: 2px;"><input type="radio" name="type" value="hourly" onclick="updateScheduleForm()"> 毎時</label>
+                              <label style="font-weight:normal; margin-top:0; font-size:11px; display: flex; align-items: center; gap: 2px;"><input type="radio" name="type" value="interval" onclick="updateScheduleForm()"> 一定間隔</label>
+                              <label style="font-weight:normal; margin-top:0; font-size:11px; display: flex; align-items: center; gap: 2px;"><input type="radio" name="type" value="datetime" onclick="updateScheduleForm()"> 日時指定</label>
+                          </div>
 
                          <label style="margin-top:3px;">日付 (日時指定用):</label>
                          <input type="date" name="run_date" id="input_run_date" style="width:100%; font-size:12px; padding:2px;">
@@ -2086,7 +2406,7 @@ const htmlTemplate = `<!DOCTYPE html>
                          <label style="margin-top:3px;">間隔時間 (毎時/一定間隔用・分):</label>
                          <input type="text" name="interval" id="input_interval" placeholder="15" style="width:100%; font-size:12px; padding:2px;">
 
-                         <button type="submit" style="margin-top:8px; width:100%; padding:4px;">➕ 登録</button>
+                         <button type="submit" style="margin-top:8px; width:100%; padding:4px;"><span data-i18n="btn_register">➕ 登録</span></button>
                      </form>
                  </div>
             </div>
@@ -2096,18 +2416,18 @@ const htmlTemplate = `<!DOCTYPE html>
         <!-- ノード・監視管理 統合画面 -->
         <div class="split-layout">
             <!-- 1. ノード一覧セクション -->
-            <div class="split-section" style="min-height: 300px; display: flex; flex-direction: row; gap: 5px; height: 350px;">
+            <div class="split-section" style="flex: 1.2; min-height: 200px; display: flex; flex-direction: row; gap: 5px; box-sizing: border-box; overflow: hidden;">
                  <div style="flex: 1.5; padding: 10px; border-right: 1px solid #ccc; height: 100%; box-sizing: border-box; overflow-y: auto;">
                      <div class="view-title" style="margin: -10px -10px 10px -10px;">
-                         <span>🖥️ ノード一覧</span>
-                         <a href="/?tab=nodes" class="refresh-icon">🔄 更新</a>
+                         <span data-i18n="node_list_title">🖥️ ノード一覧</span>
+                         <a href="/?tab=nodes" class="refresh-icon"><span data-i18n="btn_update">🔄 更新</span></a>
                      </div>
                      
                      <div style="margin-top: 5px; margin-bottom: 8px; display:flex; gap:3px; flex-wrap:wrap;">
-                         <a href="/?tab={{$.CurrentTab}}&filter=all&sort={{$.SortKey}}&order={{$.SortOrder}}" class="btn {{if eq $.FilterStatus "all"}}btn-primary{{end}}" style="font-size:10px; padding:2px 6px;">すべて</a>
-                         <a href="/?tab={{$.CurrentTab}}&filter=abnormal&sort={{$.SortKey}}&order={{$.SortOrder}}" class="btn {{if eq $.FilterStatus "abnormal"}}btn-danger{{end}}" style="font-size:10px; padding:2px 6px; {{if ne $.FilterStatus "abnormal"}}background:#fff5f5; color:#cc0000; border-color:#cc9999;{{end}}">🔴 異常のみ</a>
-                         <a href="/?tab={{$.CurrentTab}}&filter=normal&sort={{$.SortKey}}&order={{$.SortOrder}}" class="btn {{if eq $.FilterStatus "normal"}}btn-success{{end}}" style="font-size:10px; padding:2px 6px; {{if ne $.FilterStatus "normal"}}background:#f5fff5; color:#00aa00; border-color:#99cc99;{{end}}">🟢 正常のみ</a>
-                         <a href="/?tab={{$.CurrentTab}}&filter=unknown&sort={{$.SortKey}}&order={{$.SortOrder}}" class="btn {{if eq $.FilterStatus "unknown"}}btn-primary{{end}}" style="font-size:10px; padding:2px 6px; {{if ne $.FilterStatus "unknown"}}background:#f5f5f5; color:#555; border-color:#ccc;{{end}}">⚪ 未判定のみ</a>
+                         <a href="/?tab={{$.CurrentTab}}&filter=all&sort={{$.SortKey}}&order={{$.SortOrder}}" class="btn {{if eq $.FilterStatus "all"}}btn-primary{{end}}" style="font-size:10px; padding:2px 6px;"><span data-i18n="filter_all">すべて</span></a>
+                         <a href="/?tab={{$.CurrentTab}}&filter=abnormal&sort={{$.SortKey}}&order={{$.SortOrder}}" class="btn {{if eq $.FilterStatus "abnormal"}}btn-danger{{end}}" style="font-size:10px; padding:2px 6px; {{if ne $.FilterStatus "abnormal"}}background:#fff5f5; color:#cc0000; border-color:#cc9999;{{end}}"><span data-i18n="filter_abnormal">🔴 異常のみ</span></a>
+                         <a href="/?tab={{$.CurrentTab}}&filter=normal&sort={{$.SortKey}}&order={{$.SortOrder}}" class="btn {{if eq $.FilterStatus "normal"}}btn-success{{end}}" style="font-size:10px; padding:2px 6px; {{if ne $.FilterStatus "normal"}}background:#f5fff5; color:#00aa00; border-color:#99cc99;{{end}}"><span data-i18n="filter_normal">🟢 正常のみ</span></a>
+                         <a href="/?tab={{$.CurrentTab}}&filter=unknown&sort={{$.SortKey}}&order={{$.SortOrder}}" class="btn {{if eq $.FilterStatus "unknown"}}btn-primary{{end}}" style="font-size:10px; padding:2px 6px; {{if ne $.FilterStatus "unknown"}}background:#f5f5f5; color:#555; border-color:#ccc;{{end}}"><span data-i18n="filter_unknown">⚪ 未判定のみ</span></a>
                      </div>
 
                      <table border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:12px;">
@@ -2125,7 +2445,7 @@ const htmlTemplate = `<!DOCTYPE html>
                                      <td>{{.IPAddress}}</td>
                                      <td>
                                          {{if eq .Description "正常"}}<span class="badge status-success">正常</span>
-                                         {{else if eq .Description "異常"}}<span class="badge status-danger" style="background-color: #ff4d4d; color: #ffffff; font-weight: bold; border: 1px solid #d43f3a; padding: 2px 6px; box-shadow: 1px 1px 2px rgba(0,0,0,0.15);">異常</span>
+                                         {{else if eq .Description "異常"}}<span class="badge status-error" style="background-color: #ff4d4d; color: #ffffff; font-weight: bold; border: 1px solid #d43f3a; padding: 2px 6px; box-shadow: 1px 1px 2px rgba(0,0,0,0.15);">異常</span>
                                          {{else}}<span class="badge status-unknown">未実施 / 不明</span>{{end}}
                                      </td>
                                  </tr>
@@ -2148,17 +2468,17 @@ const htmlTemplate = `<!DOCTYPE html>
                          <form action="/action" method="POST" style="margin:0; flex:1;" onsubmit="return confirm('「異常」状態のノードをすべて削除しますか？');">
                              <input type="hidden" name="action" value="delete_nodes_by_status">
                              <input type="hidden" name="status" value="abnormal">
-                             <button type="submit" class="btn btn-danger" style="width:100%; font-size:11px; padding:3px;">🗑️ 異常ノード一括削除</button>
+                             <button type="submit" class="btn btn-danger" style="width:100%; font-size:11px; padding:3px;"><span data-i18n="btn_del_abnormal">🗑️ 異常ノード一括削除</span></button>
                          </form>
                          <form action="/action" method="POST" style="margin:0; flex:1;" onsubmit="return confirm('「未実施/不明」状態のノードをすべて削除しますか？');">
                              <input type="hidden" name="action" value="delete_nodes_by_status">
                              <input type="hidden" name="status" value="unknown">
-                             <button type="submit" class="btn" style="width:100%; font-size:11px; padding:3px; background: #e0e0e0; color: #333; border-color: #ccc;">🗑️ 不明ノード一括削除</button>
+                             <button type="submit" class="btn" style="width:100%; font-size:11px; padding:3px; background: #e0e0e0; color: #333; border-color: #ccc;"><span data-i18n="btn_del_unknown">🗑️ 不明ノード一括削除</span></button>
                          </form>
                          <form action="/action" method="POST" style="margin:0; flex:1;" onsubmit="return confirm('すべてのノードを削除しますか？');">
                              <input type="hidden" name="action" value="delete_nodes_by_status">
                              <input type="hidden" name="status" value="all">
-                             <button type="submit" class="btn btn-danger" style="width:100%; font-size:11px; padding:3px;">🗑️ 全ノード削除</button>
+                             <button type="submit" class="btn btn-danger" style="width:100%; font-size:11px; padding:3px;"><span data-i18n="btn_del_all">🗑️ 全ノード削除</span></button>
                          </form>
                      </div>
                  </div>
@@ -2167,7 +2487,7 @@ const htmlTemplate = `<!DOCTYPE html>
                      {{if .SelectedNodeData}}
                          <div class="view-title" style="margin: -10px -10px 10px -10px;"><span>ノード詳細: {{.SelectedNodeData.Name}}</span></div>
                          <table border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:12px; margin-bottom:10px;">
-                             <tr><th>IPアドレス</th><td>{{.SelectedNodeData.IPAddress}}</td></tr>
+                             <tr><th data-i18n="th_ip_addr">IPアドレス</th><td>{{.SelectedNodeData.IPAddress}}</td></tr>
                              <tr><th>プラットフォーム</th><td>{{.SelectedNodeData.Platform}}</td></tr>
                              <tr><th>説明</th><td>{{.SelectedNodeData.Description}}</td></tr>
                          </table>
@@ -2175,7 +2495,7 @@ const htmlTemplate = `<!DOCTYPE html>
                          <h5 style="margin:10px 0 5px 0;">このノードの監視設定</h5>
                          <table border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:11px;">
                              <thead>
-                                 <tr><th>監視項目</th><th>閾値</th><th>状態</th></tr>
+                                 <tr><th data-i18n="th_monitor_item">監視項目</th><th data-i18n="th_threshold">閾値</th><th>状態</th></tr>
                              </thead>
                              <tbody>
                                  {{range .SelectedNodeMonitors}}
@@ -2184,7 +2504,7 @@ const htmlTemplate = `<!DOCTYPE html>
                                          <td>{{.Operator}} {{.ThresholdValue}}</td>
                                          <td>
                                              {{if eq .LastStatus "正常"}}<span class="badge status-success">正常</span>
-                                             {{else if eq .LastStatus "異常"}}<span class="badge status-danger">異常</span>
+                                             {{else if eq .LastStatus "異常"}}<span class="badge status-error">異常</span>
                                              {{else}}<span class="badge status-unknown">未判定</span>{{end}}
                                          </td>
                                      </tr>
@@ -2200,10 +2520,10 @@ const htmlTemplate = `<!DOCTYPE html>
                                  <input type="hidden" name="id" value="{{.SelectedNodeData.ID}}">
                                  <button type="submit" class="btn btn-danger" onclick="return confirm('本当にこのノードを削除しますか？紐づく監視設定も削除されます。');">🗑️ ノード削除</button>
                              </form>
-                             <a href="/?tab={{$.CurrentTab}}" class="btn">クリア</a>
+                             <a href="/?tab={{$.CurrentTab}}" class="btn"><span data-i18n="btn_clear">クリア</span></a>
                          </div>
                      {{else}}
-                         <div class="view-title" style="margin: -10px -10px 10px -10px;"><span>➕ 新規ノード登録</span></div>
+                         <div class="view-title" style="margin: -10px -10px 10px -10px;"><span data-i18n="node_add_title">➕ 新規ノード登録</span></div>
                          <form action="/action" method="POST">
                              <input type="hidden" name="action" value="create_node">
                              
@@ -2222,7 +2542,7 @@ const htmlTemplate = `<!DOCTYPE html>
                              <label style="margin-top:5px;">説明:</label>
                              <input type="text" name="description" placeholder="用途など" style="width:100%; font-size:12px; padding:2px;">
 
-                             <button type="submit" style="margin-top:10px; width:100%; padding:4px;">➕ 登録</button>
+                             <button type="submit" style="margin-top:10px; width:100%; padding:4px;"><span data-i18n="btn_register">➕ 登録</span></button>
                          </form>
                      {{end}}
                  </div>
@@ -2231,10 +2551,10 @@ const htmlTemplate = `<!DOCTYPE html>
             <!-- 2. ノードマップセクション (グリッドレイアウトへ改善) -->
             <div class="split-section" style="min-height: 200px; padding:10px; height: 250px; overflow-y: auto; box-sizing: border-box;">
                  <div class="view-title" style="margin: -10px -10px 10px -10px;">
-                     <span>🗺️ ノードマップ (一覧トポロジー)</span>
-                     <a href="/?tab=nodes" class="refresh-icon">🔄 更新</a>
+                     <span data-i18n="node_map_title">🗺️ ノードマップ (一覧トポロジー)</span>
+                     <a href="/?tab=nodes" class="refresh-icon"><span data-i18n="btn_update">🔄 更新</span></a>
                  </div>
-                 <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top:10px; padding: 10px; background: #fafafa; border: 1px solid #ccc; max-height: 180px; overflow-y: auto;">
+                 <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top:10px; padding: 10px; background: #fafafa; border: 1px solid var(--border-color); max-height: 180px; overflow-y: auto;">
                      {{range .Nodes}}
                           <div class="topo-node {{if eq .Description "正常"}}topo-ok{{else if eq .Description "異常"}}topo-err{{else}}topo-unknown{{end}}" style="font-size: 11px; padding: 4px 8px; min-width: 140px; text-align: center; box-shadow: 1px 1px 3px rgba(0,0,0,0.1); border-radius: 4px; box-sizing: border-box;">
                               <a href="/?tab={{$.CurrentTab}}&s={{.ID}}&filter={{$.FilterStatus}}&sort={{$.SortKey}}&order={{$.SortOrder}}" style="color:inherit; text-decoration: none;">
@@ -2249,19 +2569,19 @@ const htmlTemplate = `<!DOCTYPE html>
             </div>
 
             <!-- 3. 監視管理セクション -->
-            <div class="split-section" style="min-height: 300px; display: flex; flex-direction: row; gap: 5px; height: 350px;">
+            <div class="split-section" style="flex: 1; min-height: 150px; display: flex; flex-direction: row; gap: 5px; box-sizing: border-box; overflow: hidden;">
                  <!-- A. 監視設定一覧 -->
                  <div style="flex: 1; padding: 10px; border-right: 1px solid #ccc; height: 100%; box-sizing: border-box; overflow-y: auto;">
                      <div class="view-title" style="margin: -10px -10px 10px -10px; display: flex; justify-content: space-between; align-items: center;">
-                         <span>🔍 監視設定一覧</span>
+                         <span data-i18n="node_monitor_title">🔍 監視設定一覧</span>
                          <div style="display:flex; gap:10px; align-items:center;">
-                             <button onclick="showAddMonitorModal()" class="btn btn-primary" style="font-size:11px; padding:2px 8px; font-weight:bold; height:20px; line-height:14px; display:inline-flex; align-items:center;">➕ 監視設定の追加</button>
-                             <a href="/?tab=nodes" class="refresh-icon">🔄 更新</a>
+                             <button onclick="showAddMonitorModal()" class="btn btn-primary" style="font-size:11px; padding:2px 8px; font-weight:bold; height:20px; line-height:14px; display:inline-flex; align-items:center;"><span data-i18n="btn_add_monitor">➕ 監視設定の追加</span></button>
+                             <a href="/?tab=nodes" class="refresh-icon"><span data-i18n="btn_update">🔄 更新</span></a>
                          </div>
                      </div>
                      <div style="font-size:12px; margin-bottom:10px;">
                          <strong>全体ステータス:</strong> 
-                         <span class="badge status-danger">異常: {{.RedCount}}</span>
+                         <span class="badge status-error">異常: {{.RedCount}}</span>
                          <span class="badge status-success">正常: {{.GreenCount}}</span>
                          <span class="badge status-unknown">不明: {{.BlueCount}}</span>
                          (合計: {{.TotalCount}} 件)
@@ -2270,11 +2590,11 @@ const htmlTemplate = `<!DOCTYPE html>
                      <table border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:12px; margin-bottom:15px;">
                          <thead>
                              <tr>
-                                 <th>対象ノード</th>
-                                 <th>監視項目</th>
-                                 <th>閾値</th>
-                                 <th>最終状態</th>
-                                 <th>操作</th>
+                                 <th data-i18n="th_target_node">対象ノード</th>
+                                 <th data-i18n="th_monitor_item">監視項目</th>
+                                 <th data-i18n="th_threshold">閾値</th>
+                                 <th data-i18n="th_last_state">最終状態</th>
+                                 <th data-i18n="th_operation">操作</th>
                              </tr>
                          </thead>
                          <tbody>
@@ -2288,14 +2608,14 @@ const htmlTemplate = `<!DOCTYPE html>
                                      <td>{{.Operator}} {{.ThresholdValue}}</td>
                                      <td>
                                          {{if eq .LastStatus "正常"}}<span class="badge status-success">正常</span>
-                                         {{else if eq .LastStatus "異常"}}<span class="badge status-danger">異常: {{.LastResultValue}}</span>
+                                         {{else if eq .LastStatus "異常"}}<span class="badge status-error">異常: {{.LastResultValue}}</span>
                                          {{else}}<span class="badge status-unknown">未判定</span>{{end}}
                                      </td>
                                      <td>
                                          <form action="/action" method="POST" style="display:inline;">
                                              <input type="hidden" name="action" value="delete_monitor">
                                              <input type="hidden" name="id" value="{{.ID}}">
-                                             <button type="submit" class="btn btn-danger">削除</button>
+                                             <button type="submit" class="btn btn-danger" data-i18n="btn_delete">削除</button>
                                          </form>
                                      </td>
                                  </tr>
@@ -2310,16 +2630,16 @@ const htmlTemplate = `<!DOCTYPE html>
                  <!-- B. 監視アラート履歴 -->
                  <div style="flex: 1; padding: 10px; height: 100%; box-sizing: border-box; overflow-y: auto;">
                       <div class="view-title" style="margin: -10px -10px 10px -10px;">
-                          <span>📜 監視アラート履歴</span>
+                          <span data-i18n="node_alert_title">📜 監視アラート履歴</span>
                       </div>
                       <table border="1" cellspacing="0" cellpadding="4" style="width:100%; font-size:11px; margin-top: 10px;">
                           <thead>
                               <tr>
-                                  <th>日時</th>
-                                  <th>対象ノード</th>
-                                  <th>項目</th>
-                                  <th>判定結果</th>
-                                  <th>ログ・結果値</th>
+                                  <th data-i18n="th_datetime">日時</th>
+                                  <th data-i18n="th_target_node">対象ノード</th>
+                                  <th data-i18n="th_item">項目</th>
+                                  <th data-i18n="th_result">判定結果</th>
+                                  <th data-i18n="th_log_value">ログ・結果値</th>
                               </tr>
                           </thead>
                           <tbody>
@@ -2330,7 +2650,7 @@ const htmlTemplate = `<!DOCTYPE html>
                                       <td>{{.Name}} ({{.Type}})</td>
                                       <td>
                                           {{if eq .Status "正常"}}<span class="badge status-success">正常</span>
-                                          {{else}}<span class="badge status-danger">異常</span>{{end}}
+                                          {{else}}<span class="badge status-error">異常</span>{{end}}
                                       </td>
                                       <td>{{.Log}}</td>
                                   </tr>
@@ -2347,62 +2667,207 @@ const htmlTemplate = `<!DOCTYPE html>
     {{else if eq .CurrentTab "settings"}}
         <!-- 設定ペイン -->
         <div class="pane-full">
-            <div class="view-title"><span>環境構築 (通知設定 & バックアップ)</span></div>
+            <div class="view-title"><span data-i18n="settings_title">環境構築 (通知設定 & バックアップ)</span></div>
             <div class="view-content">
                 {{if .ErrorMessage}}
-                    <div class="error-message">{{.ErrorMessage}}</div>
+                    <div class="error-message" style="background:#ffdddd; color:#cc0000; border:1px solid #ffbbbb; padding:10px; border-radius:4px; margin-bottom:15px; font-weight:bold; font-size:12px;">⚠️ {{.ErrorMessage}}</div>
+                {{end}}
+                {{if .SuccessMessage}}
+                    <div class="success-message" style="background:#ddffdd; color:#00aa00; border:1px solid #bbffbb; padding:10px; border-radius:4px; margin-bottom:15px; font-weight:bold; font-size:12px;">✅ {{.SuccessMessage}}</div>
                 {{end}}
 
-                <div style="background:#e8f0fe; padding:15px; border:1px solid #ccc; margin-bottom:20px;">
-                    <h3>💾 Himenos設定のインポート / エクスポート (YAML形式)</h3>
-                    <div class="help-text">すべての設定を一括バックアップ・復元できます。</div>
+                <div style="background: var(--alert-bg); padding:15px; border:1px solid var(--border-color); margin-bottom:20px; color: var(--text-color);">
+                    <h3 data-i18n="settings_en_de">💾 Himenos設定のインポート / エクスポート (YAML形式)</h3>
+                    <div class="help-text" data-i18n="settings_en_de_help">すべての設定を一括バックアップ・復元できます。</div>
                     <div style="margin-top:10px;">
-                        <a href="/export" class="btn btn-primary">📤 設定のエクスポート (himenos_backup.yaml ダウンロード)</a>
+                        <a href="/export" class="btn btn-primary"><span data-i18n="settings_export_btn">📤 設定のエクスポート (himenos_backup.yaml ダウンロード)</span></a>
                     </div>
-                    <form action="/import" method="POST" enctype="multipart/form-data" style="margin-top:15px; border-top:1px solid #ccc; padding-top:10px;">
-                        <label>📥 設定のインポート (YAMLファイルをアップロード):</label>
+                    <form action="/import" method="POST" enctype="multipart/form-data" style="margin-top:15px; border-top:1px solid var(--border-color); padding-top:10px;">
+                        <label data-i18n="settings_import_lbl">📥 設定のインポート (YAMLファイルをアップロード):</label>
                         <input type="file" name="backup_file" required>
-                        <button type="submit" style="margin-top:5px;">インポート実行</button>
+                        <button type="submit" style="margin-top:5px;" data-i18n="settings_import_btn">インポート実行</button>
                     </form>
                 </div>
 
-                <form action="/action" method="POST">
-                    <input type="hidden" name="action" value="update_settings">
+                <form action="/action" method="POST" style="margin: 0;">
+                    <input type="hidden" name="action" id="settings_action_type" value="update_settings">
 
-                    <h3>共通デフォルト通知設定</h3>
-                    <label>デフォルトの通知方法:</label>
-                    <select name="default_notify">
-                        <option value="" {{if eq .Settings.DefaultNotify ""}}selected{{end}}>通知しない</option>
-                        <option value="both" {{if eq .Settings.DefaultNotify "both"}}selected{{end}}>メール & Slack 両方</option>
-                        <option value="slack" {{if eq .Settings.DefaultNotify "slack"}}selected{{end}}>Slack のみ</option>
-                        <option value="email" {{if eq .Settings.DefaultNotify "email"}}selected{{end}}>メール のみ</option>
-                    </select>
-                    <div class="help-text">個別ジョブや監視で「デフォルト設定に従う」を選択した際、この設定が適用されます。</div>
+                    <!-- 1. 共通デフォルト設定カード -->
+                    <div style="background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); margin-bottom: 20px; color: var(--text-color);">
+                        <h3 style="margin-top: 0; display: flex; align-items: center; gap: 5px; color: var(--text-color);"><span style="font-size: 20px;">🔔</span> <span data-i18n="settings_notify_title">共通デフォルト通知設定</span></h3>
+                        <div style="display: flex; align-items: center; gap: 15px; margin-top: 10px;">
+                            <label style="font-weight: bold; color: var(--text-color); margin-bottom: 0;" data-i18n="settings_notify_lbl">デフォルトの通知方法:</label>
+                            <select name="default_notify" style="padding: 4px 8px; border: 1px solid #d0d7de; border-radius: 4px; font-size: 12px; background: #ffffff;">
+                                <option value="" {{if eq .Settings.DefaultNotify ""}}selected{{end}} data-i18n="settings_notify_opt_none">通知しない</option>
+                                <option value="both" {{if eq .Settings.DefaultNotify "both"}}selected{{end}} data-i18n="settings_notify_opt_both">メール & Slack 両方</option>
+                                <option value="slack" {{if eq .Settings.DefaultNotify "slack"}}selected{{end}} data-i18n="settings_notify_opt_slack">Slack のみ</option>
+                                <option value="email" {{if eq .Settings.DefaultNotify "email"}}selected{{end}} data-i18n="settings_notify_opt_email">メール のみ</option>
+                            </select>
+                        </div>
+                        <div class="help-text" style="margin-top: 6px; color: var(--text-color); opacity: 0.8;"><span data-i18n="settings_notify_help">※ 個別ジョブや監視で「デフォルト設定に従う」を選択した際、この設定が適用されます。</span></div>
+                    </div>
 
-                    <h3>Slack 通知設定</h3>
-                    <label>Incoming Webhook URL:</label>
-                    <input type="text" name="slack_webhook" value="{{.Settings.SlackWebhook}}" placeholder="https://hooks.slack.com/services/...">
+                    <!-- 2. 横並びの通知設定カードコンテナ -->
+                    <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+                        
+                        <!-- Slack設定カード -->
+                        <div style="flex: 1; min-width: 320px; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); display: flex; flex-direction: column; justify-content: space-between; border-top: 4px solid #4a154b; color: var(--text-color);">
+                            <div>
+                                <h3 style="margin-top: 0; display: flex; align-items: center; gap: 6px; color: #8a358b;"><span style="font-size: 20px;">💬</span> <span data-i18n="settings_slack_title">Slack 通知設定</span></h3>
+                                <div style="margin-top: 12px;">
+                                    <label style="font-weight: bold; display: block; margin-bottom: 4px; color: var(--text-color);">Incoming Webhook URL:</label>
+                                    <input type="text" name="slack_webhook" value="{{.Settings.SlackWebhook}}" placeholder="https://hooks.slack.com/services/..." style="width: 100%; padding: 6px; border: 1px solid #d0d7de; border-radius: 4px; box-sizing: border-box; font-size: 12px;">
+                                </div>
+                            </div>
+                            <div style="margin-top: 25px; display: flex; gap: 8px;">
+                                <button type="submit" onclick="document.getElementById('settings_action_type').value='update_settings';" class="btn btn-primary" style="flex: 1; padding: 8px; font-weight: bold; border-radius: 4px; font-size: 12px; cursor: pointer; text-align: center; height: 32px; display: inline-flex; justify-content: center; align-items: center;" data-i18n="settings_save_btn">💾 設定を保存</button>
+                                <button type="submit" onclick="document.getElementById('settings_action_type').value='test_slack';" class="btn" style="flex: 1; background: #e8f0fe; color: #5495e8; border: 1px solid #d2e3fc; padding: 8px; font-weight: bold; border-radius: 4px; font-size: 12px; cursor: pointer; text-align: center; height: 32px; display: inline-flex; justify-content: center; align-items: center;">⚡ テスト送信</button>
+                            </div>
+                        </div>
 
-                    <h3>メール通知設定 (SMTP)</h3>
-                    <label>SMTP サーバホスト名 (空なら通知をシミュレートログ出力します):</label>
-                    <input type="text" name="smtp_host" value="{{.Settings.SMTPHost}}" placeholder="smtp.example.com">
+                        <!-- SMTPメール設定カード -->
+                        <div style="flex: 1.2; min-width: 380px; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); border-top: 4px solid #1a73e8; display: flex; flex-direction: column; justify-content: space-between; color: var(--text-color);">
+                            <div>
+                                <h3 style="margin-top: 0; display: flex; align-items: center; gap: 6px; color: #5495e8;"><span style="font-size: 20px;">✉️</span> <span data-i18n="settings_smtp_title">メール通知設定 (SMTP)</span></h3>
+                                
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px;">
+                                    <div style="grid-column: span 2;">
+                                        <label style="font-weight: bold; display: block; margin-bottom: 4px; color: var(--text-color);" data-i18n="settings_smtp_host">SMTP サーバホスト名:</label>
+                                        <input type="text" name="smtp_host" value="{{.Settings.SMTPHost}}" placeholder="smtp.example.com" style="width: 100%; padding: 6px; border: 1px solid #d0d7de; border-radius: 4px; box-sizing: border-box; font-size: 12px;">
+                                        <span style="font-size: 10px; color: var(--text-color); opacity: 0.7;"><span data-i18n="settings_smtp_host_help">※ 空欄の場合は、通知をシミュレートして標準ログへ出力します。</span>
+                                    </div>
+                                    <div>
+                                        <label style="font-weight: bold; display: block; margin-bottom: 4px; color: var(--text-color);" data-i18n="settings_smtp_port">SMTP ポート番号:</label>
+                                        <input type="text" name="smtp_port" value="{{.Settings.SMTPPort}}" placeholder="587" style="width: 100%; padding: 6px; border: 1px solid #d0d7de; border-radius: 4px; box-sizing: border-box; font-size: 12px;">
+                                    </div>
+                                    <div>
+                                        <label style="font-weight: bold; display: block; margin-bottom: 4px; color: var(--text-color);" data-i18n="settings_smtp_user">SMTP ユーザ名:</label>
+                                        <input type="text" name="smtp_user" value="{{.Settings.SMTPUser}}" style="width: 100%; padding: 6px; border: 1px solid #d0d7de; border-radius: 4px; box-sizing: border-box; font-size: 12px;">
+                                    </div>
+                                    <div style="grid-column: span 2;">
+                                        <label style="font-weight: bold; display: block; margin-bottom: 4px; color: var(--text-color);" data-i18n="settings_smtp_pass">SMTP パスワード:</label>
+                                        <input type="password" name="smtp_pass" value="{{.Settings.SMTPPass}}" style="width: 100%; padding: 6px; border: 1px solid #d0d7de; border-radius: 4px; box-sizing: border-box; font-size: 12px;">
+                                    </div>
+                                    <div>
+                                        <label style="font-weight: bold; display: block; margin-bottom: 4px; color: var(--text-color);" data-i18n="settings_smtp_from">送信元アドレス (From):</label>
+                                        <input type="text" name="smtp_from" value="{{.Settings.SMTPFrom}}" placeholder="sender@example.com" style="width: 100%; padding: 6px; border: 1px solid #d0d7de; border-radius: 4px; box-sizing: border-box; font-size: 12px;">
+                                    </div>
+                                    <div>
+                                        <label style="font-weight: bold; display: block; margin-bottom: 4px; color: var(--text-color);" data-i18n="settings_smtp_to">送信先アドレス (To):</label>
+                                        <input type="text" name="smtp_to" value="{{.Settings.SMTPTo}}" placeholder="receiver@example.com" style="width: 100%; padding: 6px; border: 1px solid #d0d7de; border-radius: 4px; box-sizing: border-box; font-size: 12px;">
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div style="margin-top: 20px; display: flex; gap: 8px;">
+                                <button type="submit" onclick="document.getElementById('settings_action_type').value='update_settings';" class="btn btn-primary" style="flex: 1; padding: 8px; font-weight: bold; border-radius: 4px; font-size: 12px; cursor: pointer; text-align: center; height: 32px; display: inline-flex; justify-content: center; align-items: center;" data-i18n="settings_save_btn">💾 設定を保存</button>
+                                <button type="submit" onclick="document.getElementById('settings_action_type').value='test_email';" class="btn" style="flex: 1; background: #e8f0fe; color: #5495e8; border: 1px solid #d2e3fc; padding: 8px; font-weight: bold; border-radius: 4px; font-size: 12px; cursor: pointer; text-align: center; height: 32px; display: inline-flex; justify-content: center; align-items: center;">⚡ テスト送信</button>
+                            </div>
+                        </div>
 
-                    <label>SMTP ポート番号:</label>
-                    <input type="text" name="smtp_port" value="{{.Settings.SMTPPort}}" placeholder="587">
+                    </div>
+                
+                    <!-- 3. セキュリティ設定（Basic認証 & IPアドレス制限） -->
+                    <div style="background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); margin-top: 20px; color: var(--text-color);">
+                        <h3 style="margin-top: 0; display: flex; align-items: center; gap: 5px; color: var(--text-color);" data-i18n="sec_title">🔒 セキュリティ設定</h3>
+                        
+                        <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 15px;">
+                            
+                            <!-- Basic認証一覧 & 追加 -->
+                            <div style="flex: 1; min-width: 300px; border-right: 1px dashed var(--border-color); padding-right: 15px;">
+                                <h4 style="margin-top: 0;" data-i18n="sec_auth_title">Basic認証 アカウント管理</h4>
+                                <table border="1" cellspacing="0" cellpadding="4" style="width: 100%; font-size: 11px; margin-bottom: 15px;">
+                                    <thead>
+                                        <tr>
+                                            <th>ユーザー名</th>
+                                            <th style="width: 60px;">操作</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {{range .Settings.BasicAuthUsers}}
+                                            <tr>
+                                                <td>{{.Username}}</td>
+                                                <td>
+                                                    <form action="/action" method="POST" style="margin: 0; display: inline;">
+                                                        <input type="hidden" name="action" value="delete_basic_user">
+                                                        <input type="hidden" name="username" value="{{.Username}}">
+                                                        <button type="submit" class="btn btn-danger" style="font-size: 9px; padding: 1px 4px;">削除</button>
+                                                    </form>
+                                                </td>
+                                            </tr>
+                                        {{else}}
+                                            <tr><td colspan="2" style="color: #888;">登録されたユーザーはいません。(デフォルト: admin/himenos)</td></tr>
+                                        {{end}}
+                                    </tbody>
+                                </table>
+                                
+                                <form action="/action" method="POST" style="display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--border-color); padding-top: 10px;">
+                                    <input type="hidden" name="action" value="add_basic_user">
+                                    <div style="display: flex; align-items: center; gap: 5px;">
+                                        <label style="font-size: 11px; font-weight: bold; width: 80px;" data-i18n="sec_lbl_user">ユーザー名:</label>
+                                        <input type="text" name="username" required style="flex: 1; font-size: 11px; padding: 2px;">
+                                    </div>
+                                    <div style="display: flex; align-items: center; gap: 5px;">
+                                        <label style="font-size: 11px; font-weight: bold; width: 80px;" data-i18n="sec_lbl_pass">パスワード:</label>
+                                        <input type="password" name="password" required style="flex: 1; font-size: 11px; padding: 2px;">
+                                    </div>
+                                    <button type="submit" class="btn btn-primary" style="font-size: 11px; padding: 4px;" data-i18n="sec_btn_add">➕ アカウント追加</button>
+                                </form>
+                            </div>
+                            
+                            <!-- IPアドレス制限一覧 & 追加 -->
+                            <div style="flex: 1; min-width: 300px;">
+                                <h4 style="margin-top: 0;" data-i18n="sec_ip_title">接続許可IP制限管理</h4>
+                                <table border="1" cellspacing="0" cellpadding="4" style="width: 100%; font-size: 11px; margin-bottom: 15px;">
+                                    <thead>
+                                        <tr>
+                                            <th>許可IP / CIDR</th>
+                                            <th style="width: 60px;">操作</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {{range .Settings.AllowedIPs}}
+                                            <tr>
+                                                <td>{{.}}</td>
+                                                <td>
+                                                    <form action="/action" method="POST" style="margin: 0; display: inline;">
+                                                        <input type="hidden" name="action" value="delete_allowed_ip">
+                                                        <input type="hidden" name="ip" value="{{.}}">
+                                                        <button type="submit" class="btn btn-danger" style="font-size: 9px; padding: 1px 4px;">削除</button>
+                                                    </form>
+                                                </td>
+                                            </tr>
+                                        {{else}}
+                                            <tr><td colspan="2" style="color: #888;">IP制限が設定されていません。(全IPからの接続許可)</td></tr>
+                                        {{end}}
+                                    </tbody>
+                                </table>
+                                
+                                <form action="/action" method="POST" style="display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--border-color); padding-top: 10px; margin-bottom: 15px;">
+                                    <input type="hidden" name="action" value="add_allowed_ip">
+                                    <div style="display: flex; align-items: center; gap: 5px;">
+                                        <label style="font-size: 11px; font-weight: bold; width: 110px;" data-i18n="sec_ip_lbl">接続許可IP / CIDR:</label>
+                                        <input type="text" name="ip" placeholder="例: 192.168.1.50 または 192.168.1.0/24" required style="flex: 1; font-size: 11px; padding: 2px;">
+                                    </div>
+                                    <button type="submit" class="btn btn-primary" style="font-size: 11px; padding: 4px;" data-i18n="sec_btn_ip_add">➕ 制限追加</button>
+                                </form>
+                                
+                                <form action="/action" method="POST" style="border-top: 1px solid var(--border-color); padding-top: 10px; display: flex; align-items: center; justify-content: space-between;">
+                                    <input type="hidden" name="action" value="update_security_settings">
+                                    <div style="display: flex; align-items: center; gap: 8px;">
+                                        <input type="checkbox" name="ip_restriction_enabled" value="true" id="chk_ip_restrict" {{if .Settings.IPRestrictionEnabled}}checked{{end}}>
+                                        <label for="chk_ip_restrict" style="font-size: 11px; font-weight: bold; margin-top: 0;" data-i18n="sec_enable_ip">IP制限を有効にする</label>
+                                    </div>
+                                    <div style="font-size: 10px; color: var(--text-color); opacity: 0.8; margin-top: 6px; line-height: 1.4; text-align: left;" data-i18n="sec_ip_rescue_help">
+                                        ※ IP制限が有効な場合でも、ローカルホスト（127.0.0.1, ::1, localhost）からのアクセスは常に制限チェックから除外（救済許可）されます。これにより、誤ったIPアドレスを登録してしまい、管理者が自分自身でサーバーに二度とアクセスできなくなってしまう締め出し事故を完全に防ぎます。
+                                    </div>
+                                    <button type="submit" class="btn" style="font-size: 11px; padding: 3px 10px;" data-i18n="sec_btn_apply">💾 設定適用</button>
+                                </form>
+                            </div>
+                            
+                        </div>
+                    </div>
 
-                    <label>SMTP ユーザ名:</label>
-                    <input type="text" name="smtp_user" value="{{.Settings.SMTPUser}}">
-
-                    <label>SMTP パスワード:</label>
-                    <input type="password" name="smtp_pass" value="{{.Settings.SMTPPass}}">
-
-                    <label>送信元メールアドレス (From):</label>
-                    <input type="text" name="smtp_from" value="{{.Settings.SMTPFrom}}" placeholder="sender@example.com">
-
-                    <label>送信先メールアドレス (To):</label>
-                    <input type="text" name="smtp_to" value="{{.Settings.SMTPTo}}" placeholder="receiver@example.com">
-
-                    <button type="submit">💾 設定を保存</button>
                 </form>
             </div>
         </div>
@@ -2425,23 +2890,23 @@ const htmlTemplate = `<!DOCTYPE html>
             <form action="/action" method="POST" style="margin:0;">
                 <input type="hidden" name="action" value="create_monitor">
                 
-                <label style="margin-top:0px; font-weight: bold; color: #24292f;">対象ノード:</label>
+                <label style="margin-top:0px; font-weight: bold; color: var(--text-color);">対象ノード:</label>
                 <select name="node_id" style="width:100%; font-size:12px; padding:4px; border: 1px solid #d0d7de; border-radius: 4px; margin-bottom: 12px; background: #ffffff;">
                     {{range .Nodes}}
                         <option value="{{.ID}}">{{.Name}} ({{.IPAddress}})</option>
                     {{end}}
                 </select>
 
-                <label style="font-weight: bold; color: #24292f;">監視項目タイプ:</label>
+                <label style="font-weight: bold; color: var(--text-color);">監視項目タイプ:</label>
                 <select name="type" onchange="toggleTargetField()" style="width:100%; font-size:12px; padding:4px; border: 1px solid #d0d7de; border-radius: 4px; margin-bottom: 12px; background: #ffffff;">
                     <option value="ping">PING 応答監視 (死活監視)</option>
                     <option value="port">TCP ポート接続確認</option>
                 </select>
 
-                <label style="font-weight: bold; color: #24292f;">ターゲット (ポート番号など):</label>
+                <label style="font-weight: bold; color: var(--text-color);">ターゲット (ポート番号など):</label>
                 <input type="text" name="target" placeholder="例: 80" style="width:100%; font-size:12px; padding:4px; border: 1px solid #d0d7de; border-radius: 4px; margin-bottom: 15px; box-sizing: border-box;">
 
-                <button type="submit" class="btn btn-primary" style="width:100%; padding:6px; font-weight: bold; border-radius: 4px; cursor: pointer; text-align: center;">➕ 登録</button>
+                <button type="submit" class="btn btn-primary" style="width:100%; padding:6px; font-weight: bold; border-radius: 4px; cursor: pointer; text-align: center;"><span data-i18n="btn_register">➕ 登録</span></button>
             </form>
         </div>
     </div>
@@ -2494,6 +2959,7 @@ type PageData struct {
 	Settings          Settings
 	JobMap            map[string]*JobNode
 	ErrorMessage      string
+	SuccessMessage    string
 	Nodes             []*ManagedNode
 	SelectedNodeID    string
 	SelectedNodeData  *ManagedNode
@@ -2523,14 +2989,98 @@ func ipToUint32(ipStr string) uint32 {
 	return binary.BigEndian.Uint32(ipv4)
 }
 
+
+
+func parseIP(remoteAddr string) string {
+	ip, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return ip
+}
+
+func checkIP(clientIP string, allowedIPs []string) bool {
+	if len(allowedIPs) == 0 {
+		return true
+	}
+	parsedClientIP := net.ParseIP(clientIP)
+	if parsedClientIP == nil {
+		return false
+	}
+	for _, allowed := range allowedIPs {
+		allowed = strings.TrimSpace(allowed)
+		if allowed == "" {
+			continue
+		}
+		if strings.Contains(allowed, "/") {
+			_, subnet, err := net.ParseCIDR(allowed)
+			if err == nil && subnet.Contains(parsedClientIP) {
+				return true
+			}
+		} else {
+			if allowed == clientIP {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func basicAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		engine.mu.Lock()
+		settings := engine.settings
+		engine.mu.Unlock()
+
+		// 1. IPアドレス制限
+		if settings.IPRestrictionEnabled && len(settings.AllowedIPs) > 0 {
+			clientIP := parseIP(r.RemoteAddr)
+			if clientIP != "127.0.0.1" && clientIP != "::1" && clientIP != "localhost" {
+				if !checkIP(clientIP, settings.AllowedIPs) {
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = w.Write([]byte("Forbidden. Your IP (" + clientIP + ") is not allowed.\n"))
+					return
+				}
+			}
+		}
+
+		// 2. Basic認証
+		username, password, ok := r.BasicAuth()
+		users := settings.BasicAuthUsers
+		if len(users) == 0 {
+			users = []BasicAuthUser{{Username: "admin", Password: "himenos"}}
+		}
+
+		authenticated := false
+		if ok {
+			for _, user := range users {
+				if username == user.Username && password == user.Password {
+					authenticated = true
+					break
+				}
+			}
+		}
+
+		if !authenticated {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Himenos System Login"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte("Unauthorized. Access Denied.\n"))
+			return
+		}
+		next(w, r)
+	}
+}
+
+
 func main() {
+
 	initEngine()
 	StartScheduler()
 	engine.StartMonitoring()
 
 	tmpl := template.Must(template.New("index").Parse(htmlTemplate))
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/", basicAuth(func(w http.ResponseWriter, r *http.Request) {
 		tab := r.URL.Query().Get("tab")
 		if tab == "" {
 			tab = "schedules"
@@ -2548,6 +3098,7 @@ func main() {
 			JobMap:      engine.jobs,
 			NodeMap:     engine.nodes,
 			ErrorMessage: r.URL.Query().Get("err"),
+			SuccessMessage: r.URL.Query().Get("msg"),
 		}
 
 		// scripts/ フォルダのスキャン
@@ -2998,9 +3549,9 @@ func main() {
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_ = tmpl.Execute(w, data)
-	})
+	}))
 
-	http.HandleFunc("/export", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/export", basicAuth(func(w http.ResponseWriter, r *http.Request) {
 		engine.mu.Lock()
 		var jobList []*JobNode
 		for _, j := range engine.jobs {
@@ -3028,9 +3579,9 @@ func main() {
 		w.Header().Set("Content-Type", "application/x-yaml")
 		w.Header().Set("Content-Disposition", "attachment; filename=himenos_backup.yaml")
 		w.Write(data)
-	})
+	}))
 
-	http.HandleFunc("/import", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/import", basicAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Redirect(w, r, "/?tab=settings", http.StatusSeeOther)
 			return
@@ -3086,9 +3637,9 @@ func main() {
 		engine.mu.Unlock()
 
 		http.Redirect(w, r, "/?tab=settings&err=設定インポートが成功しました。", http.StatusSeeOther)
-	})
+	}))
 
-	http.HandleFunc("/action", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/action", basicAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return
@@ -3771,7 +4322,84 @@ func main() {
 			gitCommit("Web: Save script " + filePath, filePath)
 			redirectTo = "/?tab=script_edit&file=" + filePath
 
+		
+		case "add_basic_user":
+			username := r.FormValue("username")
+			password := r.FormValue("password")
+			engine.mu.Lock()
+			if username != "" && password != "" {
+				exists := false
+				for _, u := range engine.settings.BasicAuthUsers {
+					if u.Username == username {
+						exists = true
+						break
+					}
+				}
+				if !exists {
+					engine.settings.BasicAuthUsers = append(engine.settings.BasicAuthUsers, BasicAuthUser{Username: username, Password: password})
+					engine.saveSettings()
+				}
+			}
+			engine.mu.Unlock()
+			redirectTo = "/?tab=settings"
+
+		case "delete_basic_user":
+			username := r.FormValue("username")
+			engine.mu.Lock()
+			var newUsers []BasicAuthUser
+			for _, u := range engine.settings.BasicAuthUsers {
+				if u.Username != username {
+					newUsers = append(newUsers, u)
+				}
+			}
+			engine.settings.BasicAuthUsers = newUsers
+			engine.saveSettings()
+			engine.mu.Unlock()
+			redirectTo = "/?tab=settings"
+
+		case "add_allowed_ip":
+			ip := r.FormValue("ip")
+			engine.mu.Lock()
+			if ip != "" {
+				exists := false
+				for _, allowed := range engine.settings.AllowedIPs {
+					if allowed == ip {
+						exists = true
+						break
+					}
+				}
+				if !exists {
+					engine.settings.AllowedIPs = append(engine.settings.AllowedIPs, ip)
+					engine.saveSettings()
+				}
+			}
+			engine.mu.Unlock()
+			redirectTo = "/?tab=settings"
+
+		case "delete_allowed_ip":
+			ip := r.FormValue("ip")
+			engine.mu.Lock()
+			var newIPs []string
+			for _, allowed := range engine.settings.AllowedIPs {
+				if allowed != ip {
+					newIPs = append(newIPs, allowed)
+				}
+			}
+			engine.settings.AllowedIPs = newIPs
+			engine.saveSettings()
+			engine.mu.Unlock()
+			redirectTo = "/?tab=settings"
+
+		case "update_security_settings":
+			ipRestrict := r.FormValue("ip_restriction_enabled") == "true"
+			engine.mu.Lock()
+			engine.settings.IPRestrictionEnabled = ipRestrict
+			engine.saveSettings()
+			engine.mu.Unlock()
+			redirectTo = "/?tab=settings"
+
 		case "update_settings":
+
 			engine.mu.Lock()
 			engine.settings.DefaultNotify = r.FormValue("default_notify")
 			engine.settings.SlackWebhook = r.FormValue("slack_webhook")
@@ -3784,10 +4412,50 @@ func main() {
 			engine.saveSettings()
 			engine.mu.Unlock()
 			redirectTo = "/?tab=settings"
+
+		case "test_slack":
+			webhookURL := r.FormValue("slack_webhook")
+			if webhookURL == "" {
+				webhookURL = engine.settings.SlackWebhook
+			}
+			if webhookURL == "" {
+				redirectTo = "/?tab=settings&err=" + url.QueryEscape("Slack Webhook URLが設定されていません。")
+			} else {
+				sendSlack(webhookURL, "これは Himenos からの Slack テスト通知です。正常に送信されました！")
+				redirectTo = "/?tab=settings&msg=" + url.QueryEscape("Slack通知のテスト送信を実行しました。Slackチャンネルを確認してください。")
+			}
+
+		case "test_email":
+			settings := Settings{
+				SMTPHost: r.FormValue("smtp_host"),
+				SMTPPort: r.FormValue("smtp_port"),
+				SMTPUser: r.FormValue("smtp_user"),
+				SMTPPass: r.FormValue("smtp_pass"),
+				SMTPFrom: r.FormValue("smtp_from"),
+				SMTPTo:   r.FormValue("smtp_to"),
+			}
+			if settings.SMTPHost == "" { settings.SMTPHost = engine.settings.SMTPHost }
+			if settings.SMTPPort == "" { settings.SMTPPort = engine.settings.SMTPPort }
+			if settings.SMTPUser == "" { settings.SMTPUser = engine.settings.SMTPUser }
+			if settings.SMTPPass == "" { settings.SMTPPass = engine.settings.SMTPPass }
+			if settings.SMTPFrom == "" { settings.SMTPFrom = engine.settings.SMTPFrom }
+			if settings.SMTPTo == "" { settings.SMTPTo = engine.settings.SMTPTo }
+
+			if settings.SMTPHost == "" || settings.SMTPTo == "" {
+				if settings.SMTPTo == "" {
+					redirectTo = "/?tab=settings&err=" + url.QueryEscape("送信先メールアドレス(To)が入力されていません。")
+				} else {
+					sendEmail(settings, "Himenos Email Test", "これは Himenos からのメールテスト通知です。SMTPHostが未設定のため、ログへ出力されました。")
+					redirectTo = "/?tab=settings&msg=" + url.QueryEscape("SMTP未設定のため、通知ログにテストメールを出力しました（モック動作）。")
+				}
+			} else {
+				sendEmail(settings, "Himenos Email Test", "これは Himenos からのメールテスト通知です。正常に送信されました！")
+				redirectTo = "/?tab=settings&msg=" + url.QueryEscape("SMTPメールのテスト送信を実行しました。受信ボックスを確認してください。")
+			}
 		}
 
 		http.Redirect(w, r, redirectTo, http.StatusSeeOther)
-	})
+	}))
 
 	fmt.Println("Server started on :8080")
 	_ = http.ListenAndServe(":8080", nil)
