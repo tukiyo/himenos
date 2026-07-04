@@ -3586,7 +3586,17 @@ func main() {
 						expr = fmt.Sprintf("%s %s %s %s %s", min, hour, dom, mon, dow)
 					}
 				}
-				lineText := fmt.Sprintf("%s %s # %s", expr, s.JobID, s.Name)
+				targetName := s.JobID
+				if strings.HasPrefix(s.JobID, "job_") {
+					if job, exists := engine.jobs[s.JobID]; exists {
+						if job.Command != "" {
+							targetName = job.Command
+						} else {
+							targetName = job.Name
+						}
+					}
+				}
+				lineText := fmt.Sprintf("%s %s # %s", expr, targetName, s.Name)
 				if !s.Enabled {
 					lineText = "# " + lineText
 				}
@@ -4331,14 +4341,68 @@ func main() {
 				cronExpr := strings.Join(fields[0:5], " ")
 				jobID := fields[5]
 				
-				// もしJobIDが 'job_' で始まっていない場合、ジョブ名とみなしてIDに自動逆変換
-				if !strings.HasPrefix(jobID, "job_") {
+				// ジョブの逆引き & 実ファイル指定からの自動ジョブ生成
+				// ジョブの逆引き & 実ファイル指定からの自動ジョブ生成
+				var targetJob *JobNode = nil
+				if strings.HasPrefix(jobID, "job_") {
+					targetJob = engine.jobs[jobID]
+				} else {
+					// 1. ジョブ名で逆引き
 					for _, j := range engine.jobs {
 						if j.Name == jobID {
+							targetJob = j
 							jobID = j.ID
 							break
 						}
 					}
+				}
+
+				if targetJob == nil {
+					// 2. 実ファイルパス指定による自動ジョブ生成
+					normalizedPath := strings.ReplaceAll(jobID, "\\", "/")
+					
+					// 拡張子があって scripts/ で始まっていない場合は scripts/ を自動付加
+					if !strings.HasPrefix(normalizedPath, "scripts/") && (strings.HasSuffix(normalizedPath, ".sh") || strings.HasSuffix(normalizedPath, ".bat") || strings.HasSuffix(normalizedPath, ".py") || strings.HasSuffix(normalizedPath, ".exe")) {
+						normalizedPath = "scripts/" + normalizedPath
+					}
+
+					if strings.HasPrefix(normalizedPath, "scripts/") {
+						jobName := strings.TrimPrefix(normalizedPath, "scripts/")
+						
+						// 同一スクリプトパスのジョブが既にないか確認
+						var foundJob *JobNode = nil
+						for _, j := range engine.jobs {
+							if j.Command == normalizedPath {
+								foundJob = j
+								break
+							}
+						}
+
+						if foundJob != nil {
+							targetJob = foundJob
+							jobID = foundJob.ID
+						} else {
+							// ジョブ定義を新規自動作成
+							newJobID := "job_" + fmt.Sprintf("%d", time.Now().UnixNano())
+							newJob := JobNode{
+								ID:          newJobID,
+								Name:        jobName,
+								Type:        TypeJob,
+								Command:     normalizedPath,
+								Children:    []string{},
+							}
+							engine.jobs[newJobID] = &newJob
+							engine.saveJobs()
+							
+							targetJob = &newJob
+							jobID = newJobID
+						}
+					}
+				}
+
+				if targetJob == nil {
+					// ジョブが特定・自動生成できなかった場合は無視してスキップ
+					continue
 				}
 
 				var schedID string
